@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wyoming Pulse — Report</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #050810; --surface: #0a0f1a; --elevated: #0f1520;
+            --border: #1a1f2e; --text: #d4d4d4; --text2: #6b7280; --muted: #374151;
+            --teal: #14b8a6; --blue: #0ea5e9;
+            --s1: #ef4444; --s2: #f97316; --s3: #eab308; --s4: #84cc16; --s5: #22c55e;
+            --fd: 'JetBrains Mono', monospace; --fu: 'Inter', system-ui, sans-serif;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: var(--fu); background: var(--bg); color: var(--text); padding: 24px; max-width: 1000px; margin: 0 auto; font-size: 13px; }
+
+        .header { border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 20px; }
+        .header h1 { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; color: var(--teal); }
+        .header .sub { font-family: var(--fd); font-size: 9px; color: var(--muted); margin-top: 4px; }
+
+        .metrics { display: flex; gap: 24px; margin-bottom: 20px; flex-wrap: wrap; }
+        .m-item { display: flex; align-items: baseline; gap: 8px; }
+        .m-item .ml { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+        .m-item .mv { font-family: var(--fd); font-size: 16px; font-weight: 600; }
+
+        .section { background: var(--surface); border: 1px solid var(--border); padding: 12px; margin-bottom: 16px; }
+        .section h2 { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 10px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+        canvas { max-height: 240px; }
+
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; padding: 4px 6px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border-bottom: 1px solid var(--border); }
+        td { padding: 4px 6px; font-family: var(--fd); font-size: 10px; border-bottom: 1px solid rgba(26,31,46,0.4); color: var(--text2); }
+        td.title-cell { font-family: var(--fu); font-size: 11px; color: var(--text); }
+
+        .pill { display: inline-block; padding: 1px 5px; font-family: var(--fd); font-size: 8px; font-weight: 500; }
+        .pill-pos { background: rgba(34,197,94,0.15); color: var(--s5); }
+        .pill-neut { background: rgba(234,179,8,0.15); color: var(--s3); }
+        .pill-neg { background: rgba(239,68,68,0.15); color: var(--s1); }
+
+        .no-data { text-align: center; color: var(--muted); padding: 16px; font-family: var(--fd); font-size: 10px; }
+        .footer { text-align: center; color: var(--muted); font-size: 9px; margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--border); font-family: var(--fd); }
+
+        @media print {
+            body { background: #fff; color: #1a1a1a; }
+            .section { border: 1px solid #ddd; background: #fafafa; }
+            .header h1 { color: #0d9488; }
+            td, th { color: #333; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Prometheus &mdash; Wyoming Pulse</h1>
+    <div class="sub">Sentiment Intelligence Report &mdash; {{GENERATED_DATE}}</div>
+</div>
+
+<div class="metrics" id="metricsRow"></div>
+
+<div class="section">
+    <h2>Sentiment Trend</h2>
+    <canvas id="trendChart"></canvas>
+</div>
+
+<div class="section">
+    <h2>Location Analysis</h2>
+    <canvas id="locationChart"></canvas>
+</div>
+
+<div class="section">
+    <h2>Topics</h2>
+    <canvas id="topicChart"></canvas>
+</div>
+
+<div class="section">
+    <h2>Articles</h2>
+    <table id="articlesTable">
+        <thead><tr><th>Title</th><th>Source</th><th>Date</th><th>Sentiment</th><th>Location</th></tr></thead>
+        <tbody></tbody>
+    </table>
+</div>
+
+<div class="footer">Prometheus Hyperscale &mdash; Wyoming Pulse Intelligence &mdash; Confidential</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+const DATA = {{REPORT_DATA}};
+
+Chart.defaults.color = '#6b7280';
+Chart.defaults.borderColor = 'rgba(26,31,46,0.5)';
+Chart.defaults.font.family = "'Inter', sans-serif";
+Chart.defaults.font.size = 10;
+
+const ttCfg = { backgroundColor: '#0a0f1a', borderColor: '#14b8a6', borderWidth: 1, cornerRadius: 0,
+    titleFont: { family: "'JetBrains Mono'", size: 9 }, bodyFont: { family: "'JetBrains Mono'", size: 9 }, padding: 6 };
+
+function sColor(s) { if (!s) return '#374151'; if (s>=4.5) return '#22c55e'; if (s>=3.5) return '#84cc16'; if (s>=2.5) return '#eab308'; if (s>=1.5) return '#f97316'; return '#ef4444'; }
+
+function sPill(label) {
+    const cls = (label||'').includes('positive') ? 'pos' : (label||'').includes('negative') ? 'neg' : 'neut';
+    const map = { strongly_positive:'V.POS', slightly_positive:'POS', neutral:'NEU', slightly_negative:'NEG', strongly_negative:'V.NEG' };
+    return `<span class="pill pill-${cls}">${map[label]||label||'--'}</span>`;
+}
+
+const topicNames = { energy_ratepayer:'Energy/Ratepayer', water:'Water', jobs_economic:'Jobs/Econ',
+    land_use_wildlife:'Land/Wildlife', regulation_transparency:'Regulation', tax_incentives:'Tax',
+    national_security_ai:'NatSec/AI', community_impact:'Community' };
+
+// Metrics
+const m = DATA.overview;
+document.getElementById('metricsRow').innerHTML = [
+    ['Articles', m.total_articles],
+    ['Analyzed', m.analyzed_articles],
+    ['Avg', m.avg_sentiment !== null ? `<span style="color:${sColor(m.avg_sentiment)}">${m.avg_sentiment.toFixed(2)}</span>` : '--'],
+    ['Elite', DATA.voice.elite.avg !== null ? `<span style="color:${sColor(DATA.voice.elite.avg)}">${DATA.voice.elite.avg.toFixed(2)}</span>` : '--'],
+    ['Public', DATA.voice.public.avg !== null ? `<span style="color:${sColor(DATA.voice.public.avg)}">${DATA.voice.public.avg.toFixed(2)}</span>` : '--'],
+].map(([l,v]) => `<div class="m-item"><span class="ml">${l}</span><span class="mv">${v}</span></div>`).join('');
+
+// Trend
+if (DATA.trend.length > 0) {
+    new Chart(document.getElementById('trendChart'), {
+        type: 'line',
+        data: { labels: DATA.trend.map(d=>d.date), datasets: [{ data: DATA.trend.map(d=>d.avg),
+            borderColor: '#14b8a6', fill: false, tension: 0.2, pointRadius: DATA.trend.length===1?4:2, borderWidth: 1.5, pointBackgroundColor: '#14b8a6' }] },
+        options: { responsive: true, plugins: { legend: { display: false }, tooltip: ttCfg },
+            scales: { y: { min:1, max:5, grid: { color: 'rgba(26,31,46,0.5)' } }, x: { grid: { color: 'rgba(26,31,46,0.3)' } } } }
+    });
+}
+
+// Locations
+const locs = ['evanston','casper','cheyenne','statewide'];
+const locVals = locs.map(l => DATA.locations[l]?.avg || 0);
+if (locVals.some(v => v > 0)) {
+    new Chart(document.getElementById('locationChart'), {
+        type: 'bar',
+        data: { labels: locs.map((l,i) => `${l.charAt(0).toUpperCase()+l.slice(1)} (n=${DATA.locations[locs[i]]?.count||0})`),
+            datasets: [{ data: locVals, backgroundColor: locVals.map(v => v>0?sColor(v):'#1a1f2e'), borderRadius: 0 }] },
+        options: { responsive: true, plugins: { legend: { display: false }, tooltip: ttCfg },
+            scales: { y: { min:0, max:5, grid: { color: 'rgba(26,31,46,0.5)' } }, x: { grid: { display: false } } } }
+    });
+}
+
+// Topics
+if (DATA.topics.length > 0) {
+    new Chart(document.getElementById('topicChart'), {
+        type: 'bar',
+        data: { labels: DATA.topics.map(t => topicNames[t.name]||t.name),
+            datasets: [{ data: DATA.topics.map(t=>t.count), backgroundColor: DATA.topics.map(t=>sColor(t.avg)), borderRadius: 0 }] },
+        options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false }, tooltip: ttCfg },
+            scales: { x: { ticks: { stepSize: 1 }, grid: { color: 'rgba(26,31,46,0.5)' } }, y: { grid: { display: false } } } }
+    });
+}
+
+// Articles
+const tbody = document.querySelector('#articlesTable tbody');
+if (DATA.articles.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="no-data">No articles</td></tr>';
+} else {
+    tbody.innerHTML = DATA.articles.map(a => `<tr>
+        <td class="title-cell">${a.title}</td>
+        <td>${a.source}</td>
+        <td>${a.date ? new Date(a.date).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '--'}</td>
+        <td>${sPill(a.label)}</td>
+        <td>${(a.location||'').charAt(0).toUpperCase()+(a.location||'').slice(1)}</td>
+    </tr>`).join('');
+}
+</script>
+</body>
+</html>

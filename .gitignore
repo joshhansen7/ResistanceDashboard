@@ -1,0 +1,19 @@
+# Secrets
+apikey.txt
+*.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Data / logs
+wyoming-pulse/data/
+wyoming-pulse/logs/
+wyoming-pulse/output/
+
+# OS
+.DS_Store
+
+# Claude
+.claude/

@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wyoming Pulse — Prometheus</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<!-- ═══ SIDEBAR ═══ -->
+<aside class="sidebar">
+    <div class="sidebar-brand">
+        <img class="logo-img" src="{{ url_for('static', filename='images/prometheus_logo.jpg') }}" alt="Prometheus Hyperscale">
+        <div class="brand-tag">wyoming pulse</div>
+    </div>
+
+    <nav class="sidebar-nav">
+        <button class="nav-item active" data-page="dashboard" onclick="switchPage('dashboard')">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            <span>Dashboard</span>
+        </button>
+        <button class="nav-item" data-page="sentiment" onclick="switchPage('sentiment')">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+            <span>Sentiment</span>
+        </button>
+        <button class="nav-item" data-page="articles" onclick="switchPage('articles')">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            <span>Articles</span>
+        </button>
+        <button class="nav-item" data-page="system" onclick="switchPage('system')">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            <span>System</span>
+        </button>
+    </nav>
+
+    <div class="sidebar-footer">
+        <button class="btn-export" onclick="exportReport()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <span>Export</span>
+        </button>
+        <div class="last-sync"><span class="sync-dot"></span><span id="lastSync">--</span></div>
+    </div>
+</aside>
+
+<!-- ═══ MAIN ═══ -->
+<main class="main-content">
+
+    <!-- PAGE: DASHBOARD -->
+    <div id="page-dashboard" class="page active">
+        <div class="page-header">
+            <h1>Dashboard</h1>
+            <span class="page-sub">sentiment overview</span>
+        </div>
+        <div class="page-content">
+            <div class="dash-grid">
+                <!-- Map (left, spans 2 rows) -->
+                <div class="map-panel">
+                    <div class="sh">Wyoming Counties</div>
+                    <div id="wyomingMap"></div>
+                    <div class="map-tooltip" id="mapTooltip"></div>
+                    <div class="map-legend">
+                        <span>1.0</span>
+                        <div class="legend-bar"></div>
+                        <span>5.0</span>
+                    </div>
+                </div>
+
+                <!-- Metrics (right top) -->
+                <div class="metrics-panel">
+                    <div class="sh">Key Metrics</div>
+                    <div class="metric-row">
+                        <span class="m-label">Total Articles</span>
+                        <span class="m-value" id="metricTotal">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="m-label">Analyzed</span>
+                        <span class="m-value" id="metricAnalyzed">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="m-label">Avg Sentiment</span>
+                        <span class="m-value" id="metricSentiment">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="m-label">Elite Avg</span>
+                        <span class="m-value sm" id="metricElite">--</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="m-label">Public Avg</span>
+                        <span class="m-value sm" id="metricPublic">--</span>
+                    </div>
+                </div>
+
+                <!-- Voice (right bottom) -->
+                <div class="voice-panel">
+                    <div class="sh">Voice Comparison</div>
+                    <canvas id="voiceChart"></canvas>
+                    <div class="no-data" id="voiceNoData" style="display:none">No voice data</div>
+                </div>
+            </div>
+
+            <!-- Trend Chart (full width below grid) -->
+            <div class="chart-panel">
+                <div class="sh">Sentiment Trend</div>
+                <canvas id="trendChart"></canvas>
+                <div class="no-data" id="trendNoData" style="display:none">Insufficient data for trend</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- PAGE: SENTIMENT -->
+    <div id="page-sentiment" class="page">
+        <div class="page-header">
+            <h1>Sentiment</h1>
+            <span class="page-sub">heatmaps &amp; distribution</span>
+        </div>
+        <div class="page-content">
+            <div class="heatmap-wrap">
+                <div class="sh">Location &times; Time</div>
+                <div class="heatmap" id="locationHeatmap"></div>
+                <div class="no-data" id="locHeatNoData" style="display:none">No location-time data</div>
+            </div>
+
+            <div class="heatmap-wrap">
+                <div class="sh">Topic &times; Time</div>
+                <div class="heatmap" id="topicHeatmap"></div>
+                <div class="no-data" id="topicHeatNoData" style="display:none">No topic-time data</div>
+            </div>
+
+            <div class="chart-panel">
+                <div class="sh">Distribution</div>
+                <div style="max-width:360px;margin:0 auto">
+                    <canvas id="distributionChart"></canvas>
+                </div>
+                <div class="no-data" id="distNoData" style="display:none">No data</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- PAGE: ARTICLES -->
+    <div id="page-articles" class="page">
+        <div class="page-header">
+            <h1>Articles</h1>
+            <span class="page-sub">feed</span>
+        </div>
+        <div class="page-content">
+            <div class="filter-bar">
+                <select id="filterLocation" onchange="renderArticles()">
+                    <option value="">All Locations</option>
+                    <option value="evanston">Evanston</option>
+                    <option value="casper">Casper</option>
+                    <option value="cheyenne">Cheyenne</option>
+                    <option value="statewide">Statewide</option>
+                </select>
+                <select id="filterSentiment" onchange="renderArticles()">
+                    <option value="">All Sentiments</option>
+                    <option value="strongly_positive">V. Positive</option>
+                    <option value="slightly_positive">Positive</option>
+                    <option value="neutral">Neutral</option>
+                    <option value="slightly_negative">Negative</option>
+                    <option value="strongly_negative">V. Negative</option>
+                </select>
+            </div>
+            <div class="table-wrap">
+                <table class="dt" id="articleTable">
+                    <thead>
+                        <tr>
+                            <th>Title</th>
+                            <th>Source</th>
+                            <th>Date</th>
+                            <th>Sentiment</th>
+                            <th>Location</th>
+                            <th>Voice</th>
+                        </tr>
+                    </thead>
+                    <tbody id="articleBody"></tbody>
+                </table>
+                <div class="empty-state" id="articleNoData" style="display:none">No articles match filters</div>
+            </div>
+            <button class="btn-load-more" id="btnLoadMore" onclick="loadMoreArticles()" style="display:none">Load More</button>
+        </div>
+    </div>
+
+    <!-- PAGE: SYSTEM -->
+    <div id="page-system" class="page">
+        <div class="page-header">
+            <h1>System</h1>
+            <span class="page-sub">health &amp; diagnostics</span>
+        </div>
+        <div class="page-content">
+            <div class="table-wrap">
+                <div class="sh">Feed Health</div>
+                <table class="dt" id="feedTable">
+                    <thead>
+                        <tr><th>Feed</th><th>Last Run</th><th>Status</th><th>Found</th><th>Matched</th></tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+                <div class="no-data" id="feedNoData" style="display:none">No feed data</div>
+            </div>
+
+            <div class="table-wrap">
+                <div class="sh">Digest History</div>
+                <table class="dt" id="digestTable">
+                    <thead>
+                        <tr><th>Period</th><th>Articles</th><th>Avg</th><th>Generated</th><th></th></tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+                <div class="no-data" id="digestNoData" style="display:none">No digests</div>
+            </div>
+
+            <div class="sh">Database</div>
+            <div class="kv-row" id="dbStats"></div>
+        </div>
+    </div>
+
+</main>
+
+<!-- Modal -->
+<div class="modal-overlay" id="digestModal" onclick="closeModal(event)">
+    <div class="modal">
+        <div class="modal-header">
+            <h3>Digest</h3>
+            <button class="modal-close" onclick="document.getElementById('digestModal').classList.remove('show')">&times;</button>
+        </div>
+        <div class="modal-body" id="digestModalContent"></div>
+    </div>
+</div>
+
+<!-- Heatmap tooltip -->
+<div class="hm-tooltip" id="hmTooltip"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>
