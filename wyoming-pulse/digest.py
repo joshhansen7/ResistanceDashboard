@@ -35,10 +35,16 @@ The digest should include:
 
 Keep it under 1000 words. Write for busy executives who want the bottom line."""
 
-TRACKED_STATES = ["wyoming", "texas", "michigan"]
+def _get_tracked_states(conn):
+    """Derive tracked states from the database (states with analyzed articles)."""
+    rows = conn.execute(
+        "SELECT DISTINCT state FROM articles WHERE analyzed = 1 AND state IS NOT NULL "
+        "AND state NOT IN ('nationwide', 'other') ORDER BY state"
+    ).fetchall()
+    return [r["state"] for r in rows]
 
 
-def compute_stats(articles, conn=None):
+def compute_stats(articles, conn=None, tracked_states=None):
     """Compute aggregate statistics from a list of analyzed articles."""
     if not articles:
         return {}
@@ -98,7 +104,7 @@ def compute_stats(articles, conn=None):
         overall_wsi = sentiment_index.compute_wsi(conn)
         stats["wsi_overall"] = overall_wsi.get("current_wsi")
         stats["wsi_by_state"] = {}
-        for state in TRACKED_STATES:
+        for state in tracked_states:
             state_wsi = sentiment_index.compute_wsi(conn, state=state)
             stats["wsi_by_state"][state] = state_wsi.get("current_wsi")
 
@@ -108,7 +114,7 @@ def compute_stats(articles, conn=None):
     return stats
 
 
-def build_synthesis_input(articles, stats, days):
+def build_synthesis_input(articles, stats, days, tracked_states=None):
     """Build the input for Claude Sonnet to synthesize the digest."""
     lines = [f"PERIOD: Last {days} days", f"ARTICLES ANALYZED: {stats['article_count']}", ""]
 
@@ -136,7 +142,7 @@ def build_synthesis_input(articles, stats, days):
 
     # Location breakdown by state
     lines.append("\n  By location:")
-    for state in TRACKED_STATES:
+    for state in tracked_states:
         state_locs = stats.get("location_avgs", {}).get(state, {})
         if state_locs:
             for loc, data in state_locs.items():
@@ -158,7 +164,7 @@ def build_synthesis_input(articles, stats, days):
     # Individual article summaries (grouped by state)
     lines.append("\n\nARTICLE SUMMARIES:")
     lines.append("-" * 60)
-    for state in TRACKED_STATES + ["nationwide", "other"]:
+    for state in list(tracked_states) + ["nationwide", "other"]:
         state_arts = [a for a in articles if (a["state"] if a["state"] else "other") == state]
         if not state_arts:
             continue
@@ -206,7 +212,7 @@ def generate_digest_with_api(synthesis_input, days, config):
         return None, str(e)
 
 
-def format_fallback_digest(stats, articles, period_start, period_end):
+def format_fallback_digest(stats, articles, period_start, period_end, tracked_states=None):
     """Generate a basic digest without the API (template-based)."""
     lines = [
         f"# Prometheus — Intelligence Digest",
@@ -235,7 +241,7 @@ def format_fallback_digest(stats, articles, period_start, period_end):
         lines.append("")
 
     lines.append("## By Location")
-    for state in TRACKED_STATES:
+    for state in tracked_states:
         state_locs = stats.get("location_avgs", {}).get(state, {})
         for loc, data in state_locs.items():
             if data["avg"] is not None:
@@ -313,11 +319,12 @@ def generate_digest(start_date=None, end_date=None, config=None):
     max_articles = config.get("digest", {}).get("max_articles_per_digest", 50)
     article_list = list(articles)[:max_articles]
 
-    stats = compute_stats(article_list, conn=conn)
+    tracked_states = _get_tracked_states(conn)
+    stats = compute_stats(article_list, conn=conn, tracked_states=tracked_states)
 
     # Try API synthesis first, fall back to template
     days = (datetime.fromisoformat(end_date) - datetime.fromisoformat(start_date)).days
-    synthesis_input = build_synthesis_input(article_list, stats, days)
+    synthesis_input = build_synthesis_input(article_list, stats, days, tracked_states=tracked_states)
     narrative, api_error = generate_digest_with_api(synthesis_input, days, config)
 
     if narrative:
@@ -334,7 +341,7 @@ def generate_digest(start_date=None, end_date=None, config=None):
     else:
         if api_error:
             logger.warning("API synthesis failed (%s), using template fallback", api_error)
-        content = format_fallback_digest(stats, article_list, start_date, end_date)
+        content = format_fallback_digest(stats, article_list, start_date, end_date, tracked_states=tracked_states)
 
     # Save to file
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

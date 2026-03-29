@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, current_app, jsonify, request, send_file
 
 import db
+import geo
 import sentiment_index
 
 logger = logging.getLogger("wyoming_pulse.api")
@@ -138,6 +139,37 @@ def overview():
             "last_ingestion": last_ingest["run_date"] if last_ingest else None,
             "last_analysis": last_analysis["analyzed_date"] if last_analysis else None,
         })
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────
+# /api/states
+# ──────────────────────────────────────────────
+@bp.route("/states")
+def states():
+    """Return all states with analyzed articles, with reference data."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT state, COUNT(*) as count FROM articles "
+            "WHERE analyzed = 1 AND state IS NOT NULL "
+            "AND state NOT IN ('nationwide', 'other') "
+            "GROUP BY state ORDER BY state ASC"
+        ).fetchall()
+
+        states_list = []
+        for r in rows:
+            key = r["state"]
+            info = geo.get_state_info(key)
+            states_list.append({
+                "key": key,
+                "name": info["name"] if info else key.title(),
+                "abbr": info["abbr"] if info else key.upper()[:2],
+                "fips": info["fips"] if info else None,
+                "article_count": r["count"],
+            })
+        return jsonify({"states": states_list})
     finally:
         conn.close()
 

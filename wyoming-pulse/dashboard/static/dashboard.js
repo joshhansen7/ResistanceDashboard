@@ -1,4 +1,4 @@
-/* Wyoming Pulse — Bloomberg Terminal Frontend */
+/* Prometheus Resistance Dashboard — Bloomberg Terminal Frontend */
 /* D3.js map, Chart.js v4, dense data rendering */
 
 // ── State ──
@@ -11,6 +11,65 @@ let mapView = 'none';        // 'none' | 'us' | 'county'
 let mapActiveState = null;    // 'wyoming' | 'texas' | null
 let mapTopoData = null;       // cached TopoJSON
 let mapStateSentiment = {};   // cached state-level sentiment
+let _statesCache = null;      // cached /api/states response
+
+// ── Dynamic state loading ──
+async function getStates() {
+    if (!_statesCache) _statesCache = (await fetchJSON('/api/states')).states;
+    return _statesCache;
+}
+
+function getStateAbbr(stateKey) {
+    if (!stateKey) return '--';
+    if (_statesCache) {
+        const s = _statesCache.find(s => s.key === stateKey);
+        if (s) return s.abbr;
+    }
+    // Fallback for special values
+    if (stateKey === 'nationwide') return 'US';
+    return stateKey.toUpperCase().substring(0, 2);
+}
+
+function getStateName(stateKey) {
+    if (!stateKey) return '';
+    if (_statesCache) {
+        const s = _statesCache.find(s => s.key === stateKey);
+        if (s) return s.name;
+    }
+    return stateKey.charAt(0).toUpperCase() + stateKey.slice(1);
+}
+
+function getStateFips(stateKey) {
+    if (_statesCache) {
+        const s = _statesCache.find(s => s.key === stateKey);
+        if (s) return s.fips;
+    }
+    return null;
+}
+
+async function populateStateDropdown(selectId, includeAll = true, includeNationwide = false) {
+    const states = await getStates();
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    const val = sel.value; // Preserve current selection
+    sel.innerHTML = includeAll ? '<option value="">All States</option>' : '';
+    states.forEach(s => {
+        sel.innerHTML += `<option value="${s.key}">${s.name}</option>`;
+    });
+    if (includeNationwide) {
+        sel.innerHTML += '<option value="nationwide">Nationwide</option>';
+    }
+    if (val) sel.value = val; // Restore selection
+}
+
+async function initStateDropdowns() {
+    await Promise.all([
+        populateStateDropdown('dashStateFilter'),
+        populateStateDropdown('sentStateFilter'),
+        populateStateDropdown('filterState', true, true),
+        populateStateDropdown('ctrlSearchState'),
+    ]);
+}
 
 // ── Chart.js Defaults ──
 Chart.defaults.color = '#6b7280';
@@ -188,11 +247,10 @@ const STATE_CONFIG = {
     },
 };
 
-const STATE_NAME_TO_KEY = {
-    'Wyoming': 'wyoming',
-    'Texas': 'texas',
-    'Michigan': 'michigan',
-};
+function stateNameToKey(name) {
+    // Convert "Wyoming" -> "wyoming", handles all state names
+    return name ? name.toLowerCase().trim() : null;
+}
 
 // ── Tooltip positioning helper ──
 function positionTooltip(event, container) {
@@ -238,24 +296,24 @@ async function renderUSMap(stateSentiment) {
             .attr('d', path)
             .attr('data-state-name', d => d.properties.name)
             .attr('fill', d => {
-                const key = STATE_NAME_TO_KEY[d.properties.name];
+                const key = stateNameToKey(d.properties.name);
                 if (key && stateSentiment[key] && stateSentiment[key].avg !== null) {
                     return sentimentColor(stateSentiment[key].avg);
                 }
                 return '#0f1520';
             })
             .attr('stroke', d => {
-                const key = STATE_NAME_TO_KEY[d.properties.name];
+                const key = stateNameToKey(d.properties.name);
                 return (key && stateSentiment[key]) ? '#14b8a6' : 'rgba(148,163,184,0.2)';
             })
             .attr('stroke-width', d => {
-                const key = STATE_NAME_TO_KEY[d.properties.name];
+                const key = stateNameToKey(d.properties.name);
                 return (key && stateSentiment[key]) ? 0.8 : 0.3;
             })
             .attr('cursor', 'pointer')
             .on('mouseenter', function(event, d) {
                 const tooltip = document.getElementById('mapTooltip');
-                const key = STATE_NAME_TO_KEY[d.properties.name];
+                const key = stateNameToKey(d.properties.name);
                 if (key && stateSentiment[key] && stateSentiment[key].avg !== null) {
                     const s = stateSentiment[key];
                     tooltip.textContent = `${d.properties.name} | avg: ${s.avg.toFixed(1)} | n=${s.count}`;
@@ -269,7 +327,7 @@ async function renderUSMap(stateSentiment) {
                 document.getElementById('mapTooltip').classList.remove('visible');
             })
             .on('click', function(event, d) {
-                const key = STATE_NAME_TO_KEY[d.properties.name];
+                const key = stateNameToKey(d.properties.name);
                 if (key && STATE_CONFIG[key]) {
                     drillIntoState(key);
                 } else {
@@ -715,12 +773,13 @@ function renderSentimentWSIChart(trend) {
 
 async function renderPeriodCards() {
     const container = document.getElementById('periodCards');
-    const states = ['', 'wyoming', 'texas', 'michigan'];
-    const labels = ['All States', 'Wyoming', 'Texas', 'Michigan'];
+    const activeStates = await getStates();
+    const stateKeys = ['', ...activeStates.map(s => s.key)];
+    const labels = ['All States', ...activeStates.map(s => s.name)];
 
     try {
         const results = await Promise.all(
-            states.map(s => fetchJSON(`/api/sentiment-index${s ? '?state=' + s : ''}`))
+            stateKeys.map(s => fetchJSON(`/api/sentiment-index${s ? '?state=' + s : ''}`))
         );
 
         container.innerHTML = results.map((r, i) => {
@@ -737,7 +796,7 @@ async function renderPeriodCards() {
     } catch (err) { console.error('Period cards error:', err); }
 }
 
-let _hmExpandedStates = new Set(['wyoming', 'texas', 'michigan']);
+let _hmExpandedStates = new Set();
 
 function renderLocationHeatmap(locWeekly) {
     const el = document.getElementById('locationHeatmap');
@@ -756,13 +815,18 @@ function renderLocationHeatmap(locWeekly) {
         .filter(s => s !== 'nationwide' && s !== 'other')
         .sort();
 
+    // Auto-expand states on first render
+    if (_hmExpandedStates.size === 0) {
+        trackedStates.forEach(s => _hmExpandedStates.add(s));
+    }
+
     el.style.gridTemplateColumns = `140px repeat(${weeks.length}, 34px)`;
 
     let html = '<div class="hm-label"></div>';
     weeks.forEach(w => { html += `<div class="hm-header">${fmtDate(w)}</div>`; });
 
     trackedStates.forEach(state => {
-        const stateAbbr = STATE_ABBR[state] || state.toUpperCase().substring(0, 2);
+        const stateAbbr = getStateAbbr(state);
         const stateName = capitalize(state);
         const isExpanded = _hmExpandedStates.has(state);
         const arrow = isExpanded ? '\u25BC' : '\u25B6';
@@ -957,7 +1021,7 @@ function renderKeyArticles(articles) {
                 <span class="pill ${sentimentPillClass(a.sentiment_label)}">${sentimentLabel(a.sentiment_label)}</span>
                 <span class="key-article-score" style="color:${sentimentColor(a.sentiment_score)}">${a.sentiment_score.toFixed(1)}</span>
                 <span class="key-article-meta">${escapeHtml(a.source || '')} \u2014 ${fmtDate(a.published_date)}</span>
-                <span class="pill pill-state">${STATE_ABBR[a.state] || ''}</span>
+                <span class="pill pill-state">${getStateAbbr(a.state)}</span>
             </div>
             <div class="key-article-title">${a.url ? `<a href="${a.url}" target="_blank" rel="noopener">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}</div>
             <div class="key-article-reason">${reason}</div>
@@ -1017,32 +1081,28 @@ async function renderDistribution(articles) {
 // ══════════════════════════════════════════════
 //  PAGE 3: ARTICLES (table with expandable rows)
 // ══════════════════════════════════════════════
-const STATE_ABBR = { wyoming: 'WY', texas: 'TX', michigan: 'MI', nationwide: 'US', other: '??' };
-const STATE_REGIONS = {
-    wyoming: ['statewide', 'evanston', 'casper', 'cheyenne'],
-    texas: ['statewide', 'dallas'],
-    michigan: ['statewide', 'ann_arbor', 'van_buren', 'benton_harbor'],
-    nationwide: [],
-};
-
-function onStateFilterChange() {
+async function onStateFilterChange() {
     const state = document.getElementById('filterState').value;
     const locSelect = document.getElementById('filterLocation');
-    const groups = {
-        wyoming:  document.getElementById('filterLocWY'),
-        texas:    document.getElementById('filterLocTX'),
-        michigan: document.getElementById('filterLocMI'),
-    };
     locSelect.value = '';
-    if (!state) {
-        Object.values(groups).forEach(g => g.style.display = '');
-        locSelect.disabled = false;
-    } else if (state === 'nationwide') {
-        Object.values(groups).forEach(g => g.style.display = 'none');
-        locSelect.disabled = true;
+
+    if (!state || state === 'nationwide') {
+        locSelect.innerHTML = '<option value="">All Regions</option>';
+        locSelect.disabled = state === 'nationwide';
     } else {
-        Object.entries(groups).forEach(([k, g]) => g.style.display = k === state ? '' : 'none');
-        locSelect.disabled = false;
+        // Fetch locations for this state dynamically
+        try {
+            const data = await fetchJSON(`/api/locations?state=${state}`);
+            locSelect.innerHTML = '<option value="">All Regions</option>';
+            Object.keys(data).sort().forEach(loc => {
+                const label = loc.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                locSelect.innerHTML += `<option value="${loc}">${label}</option>`;
+            });
+            locSelect.disabled = false;
+        } catch (err) {
+            locSelect.innerHTML = '<option value="">All Regions</option>';
+            locSelect.disabled = false;
+        }
     }
     renderArticles();
 }
@@ -1086,7 +1146,7 @@ async function renderArticles(append = false) {
                     <td>${escapeHtml(a.source || '')}</td>
                     <td>${fmtDate(a.published_date)}</td>
                     <td><span class="pill ${sentimentPillClass(a.sentiment_label)}">${sentimentLabel(a.sentiment_label)}</span></td>
-                    <td><span class="pill pill-state">${STATE_ABBR[a.state] || (a.state ? a.state.toUpperCase() : '--')}</span></td>
+                    <td><span class="pill pill-state">${getStateAbbr(a.state)}</span></td>
                     <td><span class="pill pill-loc">${capitalize(a.location_relevance || '')}</span></td>
                 </tr>
                 <tr class="expand-row hidden" id="expand-${idx}">
@@ -1229,7 +1289,7 @@ async function saveArticle(btn, articleId) {
             if (dataRow) {
                 const cells = dataRow.querySelectorAll('td');
                 cells[3].innerHTML = `<span class="pill ${sentimentPillClass(payload.sentiment_label)}">${sentimentLabel(payload.sentiment_label)}</span>`;
-                cells[4].innerHTML = `<span class="pill pill-state">${STATE_ABBR[payload.state] || (payload.state || '--').toUpperCase()}</span>`;
+                cells[4].innerHTML = `<span class="pill pill-state">${getStateAbbr(payload.state)}</span>`;
                 cells[5].innerHTML = `<span class="pill pill-loc">${capitalize(payload.location_relevance || '')}</span>`;
             }
         } else {
@@ -1396,7 +1456,7 @@ async function renderReviewQueue() {
             const scoreCls = !hasScore ? 'rel-none' : a.relevance_score >= 8 ? 'rel-high' : a.relevance_score >= 5 ? 'rel-mid' : 'rel-low';
             const scoreText = hasScore ? a.relevance_score : '\u2014';
             const titleTrunc = a.title && a.title.length > 55 ? a.title.substring(0, 52) + '...' : (a.title || '--');
-            const stateAbbr = STATE_ABBR[a.state] || (a.state || '').toUpperCase().substring(0, 2);
+            const stateAbbr = getStateAbbr(a.state);
             const typeCls = a.source_type === 'rss' ? 'pill-rss' : 'pill-web';
             const typeLabel = a.source_type === 'rss' ? 'RSS' : 'WEB';
             const preChecked = hasScore && a.relevance_score >= 7;
@@ -1508,7 +1568,7 @@ async function renderAnalysisQueue() {
 
         tbody.innerHTML = articles.map(a => {
             const titleTrunc = a.title && a.title.length > 65 ? a.title.substring(0, 62) + '...' : (a.title || '--');
-            const stateAbbr = STATE_ABBR[a.state] || (a.state || '').toUpperCase().substring(0, 2);
+            const stateAbbr = getStateAbbr(a.state);
             return `<tr>
                 <td class="text-cell">${a.url ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" class="article-link">${escapeHtml(titleTrunc)}</a>` : escapeHtml(titleTrunc)}</td>
                 <td>${escapeHtml(a.source || '')}</td>
@@ -1805,4 +1865,7 @@ function togglePendingExpand(id, event) {
 }
 
 // ── Init ──
-document.addEventListener('DOMContentLoaded', () => { renderDashboard(); });
+document.addEventListener('DOMContentLoaded', async () => {
+    await initStateDropdowns();
+    renderDashboard();
+});

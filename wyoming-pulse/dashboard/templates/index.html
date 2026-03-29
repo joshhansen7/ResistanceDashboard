@@ -60,9 +60,6 @@
             <span class="page-sub">sentiment overview</span>
             <select id="dashStateFilter" class="dash-state-filter" onchange="onDashStateChange()">
                 <option value="">All States</option>
-                <option value="wyoming">Wyoming</option>
-                <option value="texas">Texas</option>
-                <option value="michigan">Michigan</option>
             </select>
         </div>
         <div class="page-content">
@@ -148,9 +145,6 @@
             <span class="page-sub">intelligence deep-dive</span>
             <select id="sentStateFilter" class="dash-state-filter" onchange="renderSentiment()">
                 <option value="">All States</option>
-                <option value="wyoming">Wyoming</option>
-                <option value="texas">Texas</option>
-                <option value="michigan">Michigan</option>
             </select>
         </div>
         <div class="page-content">
@@ -225,29 +219,10 @@
             <div class="filter-bar">
                 <select id="filterState" onchange="onStateFilterChange()">
                     <option value="">All States</option>
-                    <option value="wyoming">Wyoming</option>
-                    <option value="texas">Texas</option>
-                    <option value="michigan">Michigan</option>
                     <option value="nationwide">Nationwide</option>
                 </select>
                 <select id="filterLocation" onchange="renderArticles()">
                     <option value="">All Regions</option>
-                    <optgroup id="filterLocWY" label="Wyoming">
-                        <option value="statewide" data-state="wyoming">Statewide</option>
-                        <option value="evanston" data-state="wyoming">Evanston</option>
-                        <option value="casper" data-state="wyoming">Casper</option>
-                        <option value="cheyenne" data-state="wyoming">Cheyenne</option>
-                    </optgroup>
-                    <optgroup id="filterLocTX" label="Texas">
-                        <option value="statewide" data-state="texas">TX Statewide</option>
-                        <option value="dallas" data-state="texas">Dallas</option>
-                    </optgroup>
-                    <optgroup id="filterLocMI" label="Michigan">
-                        <option value="statewide" data-state="michigan">MI Statewide</option>
-                        <option value="ann_arbor" data-state="michigan">Ann Arbor</option>
-                        <option value="van_buren" data-state="michigan">Van Buren</option>
-                        <option value="benton_harbor" data-state="michigan">Benton Harbor</option>
-                    </optgroup>
                 </select>
                 <select id="filterSentiment" onchange="renderArticles()">
                     <option value="">All Sentiments</option>
@@ -404,9 +379,6 @@
                             <label>State</label>
                             <select id="ctrlSearchState">
                                 <option value="">All States</option>
-                                <option value="wyoming">Wyoming</option>
-                                <option value="texas">Texas</option>
-                                <option value="michigan">Michigan</option>
                             </select>
                         </div>
                         <div class="form-group" style="justify-content: flex-end;">

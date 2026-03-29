@@ -120,6 +120,25 @@ def init_db(db_path=None):
         if "state" not in pending_cols:
             conn.execute("ALTER TABLE pending_articles ADD COLUMN state TEXT")
             logger.info("Migrated: added state column to pending_articles")
+        # Migrate: add locations_json column to articles
+        if "locations_json" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN locations_json TEXT")
+            logger.info("Migrated: added locations_json column to articles")
+            # Backfill from existing state/location_relevance
+            rows = conn.execute(
+                "SELECT id, state, location_relevance FROM articles WHERE locations_json IS NULL"
+            ).fetchall()
+            for r in rows:
+                state = r["state"] or "other"
+                loc = r["location_relevance"]
+                entry = {"state": state, "relevance": "primary"}
+                if loc and loc not in ("statewide", "nationwide"):
+                    entry["place"] = loc
+                conn.execute(
+                    "UPDATE articles SET locations_json = ? WHERE id = ?",
+                    (json.dumps([entry]), r["id"]),
+                )
+            logger.info("Backfilled locations_json for %d articles", len(rows))
         conn.commit()
         logger.info("Database initialized at %s", db_path or DB_PATH)
     finally:
@@ -172,6 +191,13 @@ def get_unanalyzed_articles(conn, limit=20):
 
 def update_article_analysis(conn, article_id, analysis):
     """Update an article with sentiment analysis results."""
+    # Serialize locations_json
+    locations_json = analysis.get("locations_json")
+    if locations_json and isinstance(locations_json, list):
+        locations_str = json.dumps(locations_json)
+    else:
+        locations_str = None
+
     sql = """
     UPDATE articles SET
         analyzed = 1,
@@ -185,7 +211,8 @@ def update_article_analysis(conn, article_id, analysis):
         entities_mentioned = ?,
         key_claims = ?,
         sentiment_justification = ?,
-        analysis_raw = ?
+        analysis_raw = ?,
+        locations_json = ?
     WHERE id = ?
     """
     now = datetime.utcnow().isoformat()
@@ -201,6 +228,7 @@ def update_article_analysis(conn, article_id, analysis):
         analysis.get("key_claims"),
         analysis.get("sentiment_justification"),
         json.dumps(analysis),
+        locations_str,
         article_id,
     )
     conn.execute(sql, params)

@@ -19,17 +19,24 @@ Analyze the following article and return a JSON object (no markdown fences, no p
 {
   "sentiment_score": <float 1.0-5.0>,
   "sentiment_label": "<strongly_negative|slightly_negative|neutral|slightly_positive|strongly_positive>",
-  "state": "<wyoming|texas|michigan|nationwide|other>",
-  "location_relevance": "<statewide|evanston|casper|cheyenne|dallas|ann_arbor|van_buren|benton_harbor|nationwide|other>",
+  "locations": [
+    {"state": "<lowercase state name>", "place": "<city, township, or county if applicable>", "relevance": "<primary|mentioned>"}
+  ],
   "topic_tags": ["<from: energy_ratepayer, water, jobs_economic, land_use_wildlife, regulation_transparency, tax_incentives, national_security_ai, community_impact>"],
   "entities_mentioned": ["<company or organization names>"],
   "key_claims": "<1-2 sentence summary of the most notable claims or narratives>",
   "sentiment_justification": "<1-2 sentences explaining why this specific score was assigned — cite the specific tone, framing, or quotes that drove the rating>"
 }
 
-State and location rules:
-- "state": the US state the article primarily concerns. Use "nationwide" for federal/national policy with no single state focus. Use "other" for states not listed.
-- "location_relevance": the specific city/region within the state. Use "statewide" when the article covers a whole state without a specific city focus. Use "nationwide" only when state is also "nationwide". Wyoming cities: evanston, casper, cheyenne. Texas cities: dallas. Michigan locations: ann_arbor (Ann Arbor / Saline Township / Washtenaw County), van_buren (Van Buren Township / Wayne County), benton_harbor (Benton Township / Benton Harbor / Berrien County).
+Geographic tagging rules for the "locations" array:
+- Each entry needs "state" (lowercase US state name), optional "place" (specific city/township/county), and "relevance" ("primary" or "mentioned")
+- "primary": the article is primarily about this place. "mentioned": the place is referenced but isn't the main focus
+- An article can have multiple primary locations (e.g., comparing developments in two cities)
+- An article about state-level policy should include a statewide entry with no "place" field
+- If the article discusses both statewide policy AND specific locations, include entries for both
+- If the article is about multiple states, include entries for each state
+- Use "nationwide" as state for federal/national scope with no single-state focus
+- Be specific with place names: prefer "Saline Township" over "Ann Arbor area" if the article names the township
 
 Sentiment scale:
 1.0 = Strongly negative (active opposition, calls for moratorium, fear-based)
@@ -58,16 +65,42 @@ def build_user_message(article):
 
 def parse_analysis_response(response_text):
     """Parse the JSON response from Claude, handling edge cases."""
+    from geo import normalize_locations
+
     result = parse_json_response(response_text)
     if result is None:
         return None
 
-    # Validate required fields
-    required = ["sentiment_score", "sentiment_label", "state", "location_relevance"]
-    for field in required:
-        if field not in result:
-            logger.warning("Missing required field in response: %s", field)
-            return None
+    # Validate required fields — accept either new format (locations) or old (state + location_relevance)
+    if "sentiment_score" not in result or "sentiment_label" not in result:
+        logger.warning("Missing sentiment_score or sentiment_label in response")
+        return None
+
+    # Handle location formats
+    if "locations" in result and isinstance(result["locations"], list) and result["locations"]:
+        # New multi-location format
+        locations = result["locations"]
+        # Normalize FIPS
+        normalize_locations(locations)
+        result["locations_json"] = locations
+        # Set backward-compat fields from first primary (or first) location
+        primary = next((l for l in locations if l.get("relevance") == "primary"), locations[0])
+        result["state"] = primary.get("state", "other")
+        place = primary.get("place")
+        result["location_relevance"] = place if place else "statewide"
+    elif "state" in result:
+        # Old single-location format — wrap into locations array
+        state = result.get("state", "other")
+        loc = result.get("location_relevance", "statewide")
+        entry = {"state": state, "relevance": "primary"}
+        if loc and loc not in ("statewide", "nationwide"):
+            entry["place"] = loc
+        locations = [entry]
+        normalize_locations(locations)
+        result["locations_json"] = locations
+    else:
+        logger.warning("No location data in response")
+        return None
 
     # Clamp sentiment score to valid range
     score = result.get("sentiment_score", 3.0)
