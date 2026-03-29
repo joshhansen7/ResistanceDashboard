@@ -542,6 +542,52 @@ def control_run_websearch():
     return jsonify({"task_id": task_id})
 
 
+@bp.route("/control/pending-batches")
+def control_pending_batches():
+    """Return all pending batches grouped by search_id with metadata."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT search_id, COUNT(*) as count, "
+            "MIN(created_date) as created_date, "
+            "AVG(relevance_score) as avg_relevance "
+            "FROM pending_articles WHERE status = 'pending' "
+            "GROUP BY search_id ORDER BY created_date DESC"
+        ).fetchall()
+        batches = [
+            {
+                "search_id": r["search_id"],
+                "count": r["count"],
+                "created_date": r["created_date"],
+                "avg_relevance": round(r["avg_relevance"], 1) if r["avg_relevance"] is not None else None,
+            }
+            for r in rows
+        ]
+        return jsonify({"batches": batches})
+    finally:
+        conn.close()
+
+
+@bp.route("/control/discard-batch", methods=["POST"])
+def control_discard_batch():
+    """Reject all pending articles in a batch by search_id."""
+    data = request.get_json(force=True)
+    search_id = data.get("search_id", "").strip()
+    if not search_id:
+        return jsonify({"success": False, "error": "search_id required"}), 400
+    conn = get_conn()
+    try:
+        result = conn.execute(
+            "UPDATE pending_articles SET status = 'rejected' "
+            "WHERE search_id = ? AND status = 'pending'",
+            (search_id,),
+        )
+        conn.commit()
+        return jsonify({"success": True, "discarded": result.rowcount})
+    finally:
+        conn.close()
+
+
 @bp.route("/control/pending")
 def control_pending():
     """Get pending articles for review."""

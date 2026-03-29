@@ -13,9 +13,9 @@
     --border:        #1a1f2e;
     --border-active: #14b8a6;
 
-    --text-primary:  #d4d4d4;
-    --text-secondary:#6b7280;
-    --text-muted:    #374151;
+    --text-primary:  #e2e2e2;
+    --text-secondary:#9ca3af;
+    --text-muted:    #4b5563;
     --text-dim:      #1f2937;
 
     --accent-teal:   #14b8a6;
@@ -40,7 +40,7 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-html { font-size: 14px; }
+html { font-size: 15px; }
 
 body {
     font-family: var(--font-ui);
@@ -119,10 +119,10 @@ body::after {
     display: flex;
     align-items: center;
     gap: var(--sp-sm);
-    padding: 7px var(--sp-lg);
+    padding: 9px var(--sp-lg);
     color: var(--text-secondary);
     font-family: var(--font-ui);
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 400;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -236,7 +236,7 @@ body::after {
 
 .page-header h1 {
     font-family: var(--font-ui);
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -245,7 +245,7 @@ body::after {
 
 .page-header .page-sub {
     font-family: var(--font-data);
-    font-size: 10px;
+    font-size: 11px;
     color: var(--text-muted);
 }
 
@@ -259,11 +259,11 @@ body::after {
 /* ═══ SECTION HEADERS ═══ */
 .sh {
     font-family: var(--font-ui);
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: var(--text-muted);
+    letter-spacing: 0.1em;
+    color: var(--text-secondary);
     margin-bottom: var(--sp-sm);
     margin-top: var(--sp-xl);
     padding-bottom: var(--sp-xs);
@@ -382,7 +382,7 @@ body::after {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    padding: 6px 0;
+    padding: 8px 0;
     border-bottom: 1px solid rgba(26, 31, 46, 0.4);
 }
 
@@ -390,10 +390,10 @@ body::after {
 
 .metric-row .m-label {
     font-family: var(--font-ui);
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 500;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.06em;
     color: var(--text-secondary);
 }
 
@@ -454,8 +454,8 @@ canvas { max-height: 260px; }
 
 .hm-header {
     font-family: var(--font-data);
-    font-size: 8px;
-    color: var(--text-muted);
+    font-size: 10px;
+    color: var(--text-secondary);
     text-align: center;
     padding: 2px;
     min-width: 34px;
@@ -463,7 +463,7 @@ canvas { max-height: 260px; }
 
 .hm-label {
     font-family: var(--font-data);
-    font-size: 9px;
+    font-size: 11px;
     color: var(--text-secondary);
     padding-right: 8px;
     display: flex;
@@ -523,27 +523,27 @@ canvas { max-height: 260px; }
 
 .dt th {
     text-align: left;
-    padding: 5px 8px;
+    padding: 7px 8px;
     font-family: var(--font-ui);
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--text-muted);
+    color: var(--text-secondary);
     border-bottom: 1px solid var(--border);
 }
 
 .dt td {
-    padding: 5px 8px;
+    padding: 7px 8px;
     font-family: var(--font-data);
-    font-size: 11px;
+    font-size: 12px;
     border-bottom: 1px solid rgba(26, 31, 46, 0.4);
     color: var(--text-secondary);
 }
 
 .dt td.text-cell {
     font-family: var(--font-ui);
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-primary);
 }
 
@@ -725,9 +725,9 @@ a.article-link:hover {
 /* ═══ BADGES (sentiment pills) ═══ */
 .pill {
     display: inline-block;
-    padding: 1px 6px;
+    padding: 2px 7px;
     font-family: var(--font-data);
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 500;
     letter-spacing: 0.02em;
 }
@@ -1095,6 +1095,108 @@ a.article-link:hover {
 
 .btn-reject:hover:not(:disabled) {
     background: rgba(239, 68, 68, 0.1);
+}
+
+.btn-discard {
+    border-color: var(--text-muted) !important;
+    color: var(--text-muted) !important;
+}
+
+.btn-discard:hover:not(:disabled) {
+    border-color: var(--sent-2) !important;
+    color: var(--sent-2) !important;
+}
+
+/* ═══ PENDING BATCH QUEUE ═══ */
+.queue-empty {
+    font-family: var(--font-data);
+    font-size: 11px;
+    color: var(--text-muted);
+    padding: var(--sp-md) 0;
+}
+
+.batch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    margin-bottom: 4px;
+    transition: border-color 0.1s;
+}
+
+.batch-row-active {
+    border-color: var(--accent-teal);
+}
+
+.batch-meta {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    font-family: var(--font-data);
+    font-size: 11px;
+}
+
+.batch-id {
+    color: var(--accent-teal);
+    font-weight: 500;
+    letter-spacing: 0.05em;
+}
+
+.batch-date { color: var(--text-secondary); }
+
+.batch-count {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.batch-score { color: var(--text-muted); }
+
+.batch-actions {
+    display: flex;
+    gap: var(--sp-sm);
+}
+
+.btn-batch-review {
+    background: transparent;
+    border: 1px solid var(--border-active);
+    color: var(--accent-teal);
+    font-family: var(--font-data);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    padding: 4px 12px;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+
+.btn-batch-review:hover { background: rgba(20,184,166,0.08); }
+
+.btn-batch-discard {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-family: var(--font-data);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    padding: 4px 12px;
+    cursor: pointer;
+    transition: border-color 0.1s, color 0.1s;
+}
+
+.btn-batch-discard:hover {
+    border-color: var(--sent-2);
+    color: var(--sent-2);
+}
+
+.btn-batch-discard:disabled { opacity: 0.4; cursor: wait; }
+
+.batch-review-status {
+    margin-top: var(--sp-sm);
+    font-family: var(--font-data);
+    font-size: 11px;
 }
 
 .review-table {

@@ -243,6 +243,44 @@
         </div>
         <div class="page-content">
 
+            <!-- Pending Review Queue -->
+            <div class="control-section" id="pendingQueueSection">
+                <div class="sh">Pending Review Queue</div>
+                <p class="control-desc">Articles from previous web searches awaiting approval. Reviewing or discarding batches also unblocks future searches from finding the same articles.</p>
+                <div id="pendingQueueList">
+                    <div class="queue-empty" id="pendingQueueEmpty" style="display:none">No pending batches — queue is clear.</div>
+                </div>
+                <!-- Batch article review panel (shared with web search results) -->
+                <div id="batchReviewPanel" style="display:none">
+                    <div class="review-header">
+                        <div class="review-summary">
+                            Batch <span id="batchReviewId" style="font-family:var(--font-data);color:var(--accent-teal)"></span> &mdash;
+                            <span id="batchReviewCount">0</span> articles &mdash;
+                            <span id="batchReviewSelected">0</span> selected
+                        </div>
+                        <div class="review-actions">
+                            <button class="btn-action btn-approve" onclick="approveBatchSelected()">Approve Selected</button>
+                            <button class="btn-action btn-reject" onclick="rejectBatchUnselected()">Reject Unselected</button>
+                            <button class="btn-action btn-discard" onclick="discardCurrentBatch()">Discard Batch</button>
+                        </div>
+                    </div>
+                    <table class="dt review-table" id="batchReviewTable">
+                        <thead>
+                            <tr>
+                                <th style="width:30px"><input type="checkbox" id="batchSelectAll" onchange="toggleAllBatch(this.checked)"></th>
+                                <th style="width:50px">Score</th>
+                                <th>Title</th>
+                                <th>Source</th>
+                                <th>Date</th>
+                                <th>Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody id="batchReviewBody"></tbody>
+                    </table>
+                    <div class="batch-review-status" id="batchReviewStatus"></div>
+                </div>
+            </div>
+
             <!-- Manual Article Entry -->
             <div class="control-section">
                 <div class="sh">Manual Article Entry</div>

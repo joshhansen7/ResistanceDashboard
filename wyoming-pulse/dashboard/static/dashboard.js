@@ -868,12 +868,202 @@ function exportReport() { window.location.href = '/api/export'; }
 // ══════════════════════════════════════════════
 let _pollTimers = {};
 
+let _currentBatchId = null;
+
+async function renderPendingQueue() {
+    const list = document.getElementById('pendingQueueList');
+    const empty = document.getElementById('pendingQueueEmpty');
+    const panel = document.getElementById('batchReviewPanel');
+    try {
+        const data = await fetchJSON('/api/control/pending-batches');
+        const batches = data.batches || [];
+
+        // Clear existing batch rows (keep the empty message and review panel)
+        Array.from(list.children).forEach(el => {
+            if (el.id !== 'pendingQueueEmpty' && el.id !== 'batchReviewPanel') el.remove();
+        });
+
+        if (batches.length === 0) {
+            empty.style.display = 'block';
+            panel.style.display = 'none';
+            _currentBatchId = null;
+            return;
+        }
+        empty.style.display = 'none';
+
+        batches.forEach(b => {
+            const scoreText = b.avg_relevance !== null ? `avg score ${b.avg_relevance}` : 'unscored';
+            const date = b.created_date ? fmtDateTime(b.created_date) : '--';
+            const isActive = _currentBatchId === b.search_id;
+            const row = document.createElement('div');
+            row.className = 'batch-row' + (isActive ? ' batch-row-active' : '');
+            row.id = `batch-row-${b.search_id}`;
+            row.innerHTML = `
+                <div class="batch-meta">
+                    <span class="batch-id">${b.search_id}</span>
+                    <span class="batch-date">${date}</span>
+                    <span class="batch-count">${b.count} article${b.count !== 1 ? 's' : ''}</span>
+                    <span class="batch-score">${scoreText}</span>
+                </div>
+                <div class="batch-actions">
+                    <button class="btn-batch-review" onclick="openBatchReview('${b.search_id}', ${b.count})">
+                        ${isActive ? 'Hide' : 'Review'}
+                    </button>
+                    <button class="btn-batch-discard" onclick="discardBatch('${b.search_id}', this)">Discard</button>
+                </div>
+            `;
+            list.insertBefore(row, empty);
+        });
+
+        // Re-open active batch if still present
+        if (_currentBatchId && batches.find(b => b.search_id === _currentBatchId)) {
+            await loadBatchArticles(_currentBatchId);
+        } else {
+            panel.style.display = 'none';
+            _currentBatchId = null;
+        }
+    } catch (err) { console.error('Pending queue error:', err); }
+}
+
+async function openBatchReview(searchId, count) {
+    const panel = document.getElementById('batchReviewPanel');
+    if (_currentBatchId === searchId && panel.style.display !== 'none') {
+        panel.style.display = 'none';
+        _currentBatchId = null;
+        renderPendingQueue();
+        return;
+    }
+    _currentBatchId = searchId;
+    document.getElementById('batchReviewId').textContent = searchId;
+    document.getElementById('batchReviewCount').textContent = count;
+    document.getElementById('batchReviewStatus').innerHTML = '';
+    await loadBatchArticles(searchId);
+    renderPendingQueue();
+}
+
+async function loadBatchArticles(searchId) {
+    const panel = document.getElementById('batchReviewPanel');
+    const tbody = document.getElementById('batchReviewBody');
+    try {
+        const data = await fetchJSON(`/api/control/pending?search_id=${searchId}`);
+        if (!data.articles || data.articles.length === 0) {
+            panel.style.display = 'none';
+            return;
+        }
+        panel.style.display = 'block';
+        // Position panel after the batch row
+        const batchRow = document.getElementById(`batch-row-${searchId}`);
+        if (batchRow) batchRow.after(panel);
+
+        document.getElementById('batchSelectAll').checked = true;
+        tbody.innerHTML = data.articles.map(a => {
+            const hasScore = a.relevance_score !== null && a.relevance_score !== undefined;
+            const scoreCls = !hasScore ? 'rel-none' : a.relevance_score >= 8 ? 'rel-high' : a.relevance_score >= 5 ? 'rel-mid' : 'rel-low';
+            const scoreText = hasScore ? a.relevance_score : '—';
+            const titleTrunc = a.title && a.title.length > 60 ? a.title.substring(0, 57) + '...' : (a.title || '--');
+            const reason = a.relevance_reason || (hasScore ? '' : 'Not scored');
+            const reasonTrunc = reason.length > 50 ? reason.substring(0, 47) + '...' : reason;
+            const summary = a.summary ? escapeHtml(a.summary) : '<span style="color:var(--text-muted)">No summary</span>';
+            return `<tr style="cursor:pointer" onclick="togglePendingExpand(${a.id}, event)">
+                <td><input type="checkbox" class="batch-check" data-id="${a.id}" checked onchange="updateBatchSelectedCount()"></td>
+                <td><span class="relevance-score ${scoreCls}">${scoreText}</span></td>
+                <td class="text-cell" title="${escapeHtml(a.title)}"><a href="${escapeHtml(a.url || '#')}" target="_blank" rel="noopener" class="article-link">${escapeHtml(titleTrunc)}</a></td>
+                <td>${escapeHtml(a.source || '')}</td>
+                <td>${fmtDate(a.published_date)}</td>
+                <td class="text-cell" title="${escapeHtml(reason)}">${escapeHtml(reasonTrunc)}</td>
+            </tr>
+            <tr class="expand-row hidden" id="pending-expand-${a.id}">
+                <td colspan="6" class="pending-detail">
+                    <div class="pending-detail-reason"><strong>Relevance:</strong> ${escapeHtml(reason)}</div>
+                    <div class="pending-detail-summary">${summary}</div>
+                    ${a.url ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" class="article-link" style="font-size:10px;word-break:break-all">${escapeHtml(a.url)}</a>` : ''}
+                </td>
+            </tr>`;
+        }).join('');
+        updateBatchSelectedCount();
+    } catch (err) { console.error('Load batch error:', err); }
+}
+
+function toggleAllBatch(checked) {
+    document.querySelectorAll('.batch-check').forEach(cb => { cb.checked = checked; });
+    updateBatchSelectedCount();
+}
+
+function updateBatchSelectedCount() {
+    const checked = document.querySelectorAll('.batch-check:checked').length;
+    document.getElementById('batchReviewSelected').textContent = checked;
+}
+
+async function approveBatchSelected() {
+    const ids = Array.from(document.querySelectorAll('.batch-check:checked')).map(cb => parseInt(cb.dataset.id));
+    const unchecked = Array.from(document.querySelectorAll('.batch-check:not(:checked)')).map(cb => parseInt(cb.dataset.id));
+    if (ids.length === 0) return;
+    const status = document.getElementById('batchReviewStatus');
+    try {
+        const resp = await fetch('/api/control/approve', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ article_ids: ids }),
+        });
+        const data = await resp.json();
+        if (data.success) {
+            if (unchecked.length > 0) {
+                await fetch('/api/control/reject', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ article_ids: unchecked }),
+                });
+            }
+            status.innerHTML = `<span class="task-complete">Approved ${data.approved} article${data.approved !== 1 ? 's' : ''}</span>`;
+            _currentBatchId = null;
+            await renderPendingQueue();
+        }
+    } catch (err) { console.error('Approve batch error:', err); }
+}
+
+async function rejectBatchUnselected() {
+    const ids = Array.from(document.querySelectorAll('.batch-check:not(:checked)')).map(cb => parseInt(cb.dataset.id));
+    if (ids.length === 0) return;
+    const status = document.getElementById('batchReviewStatus');
+    try {
+        await fetch('/api/control/reject', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ article_ids: ids }),
+        });
+        status.innerHTML = `<span class="task-complete">Rejected ${ids.length} article${ids.length !== 1 ? 's' : ''}</span>`;
+        _currentBatchId = null;
+        await renderPendingQueue();
+    } catch (err) { console.error('Reject batch error:', err); }
+}
+
+async function discardCurrentBatch() {
+    if (!_currentBatchId) return;
+    await discardBatch(_currentBatchId, null);
+}
+
+async function discardBatch(searchId, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    const status = document.getElementById('batchReviewStatus');
+    try {
+        const resp = await fetch('/api/control/discard-batch', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ search_id: searchId }),
+        });
+        const data = await resp.json();
+        if (data.success) {
+            if (status) status.innerHTML = `<span class="task-complete">Discarded ${data.discarded} article${data.discarded !== 1 ? 's' : ''}</span>`;
+            if (_currentBatchId === searchId) _currentBatchId = null;
+            await renderPendingQueue();
+        }
+    } catch (err) { console.error('Discard error:', err); }
+}
+
 async function renderControl() {
     // Set default date to today
     const dateEl = document.getElementById('ctrlDate');
     if (dateEl && !dateEl.value) {
         dateEl.value = new Date().toISOString().split('T')[0];
     }
+
+    await renderPendingQueue();
 
     // Load recent tasks
     try {
