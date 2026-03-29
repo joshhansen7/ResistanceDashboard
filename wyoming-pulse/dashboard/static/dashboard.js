@@ -146,9 +146,29 @@ const CITY_COORDS = {
     cheyenne:  [-104.8202, 41.1400],
 };
 const COUNTY_FIPS_MAP = {
-    '56041': 'uinta',     // Evanston
-    '56025': 'natrona',   // Casper
-    '56021': 'laramie',   // Cheyenne
+    '56001': 'Albany',
+    '56003': 'Big Horn',
+    '56005': 'Campbell',
+    '56007': 'Carbon',
+    '56009': 'Converse',
+    '56011': 'Crook',
+    '56013': 'Fremont',
+    '56015': 'Goshen',
+    '56017': 'Hot Springs',
+    '56019': 'Johnson',
+    '56021': 'Laramie',
+    '56023': 'Lincoln',
+    '56025': 'Natrona',
+    '56027': 'Niobrara',
+    '56029': 'Park',
+    '56031': 'Platte',
+    '56033': 'Sheridan',
+    '56035': 'Sublette',
+    '56037': 'Sweetwater',
+    '56039': 'Teton',
+    '56041': 'Uinta',
+    '56043': 'Washakie',
+    '56045': 'Weston',
 };
 
 async function renderMap(locations) {
@@ -203,16 +223,17 @@ async function renderMap(locations) {
                 const tooltip = document.getElementById('mapTooltip');
                 if (countyName) {
                     const locKey = Object.keys(CITY_COORDS).find(k => {
-                        if (countyName === 'uinta') return k === 'evanston';
-                        if (countyName === 'natrona') return k === 'casper';
-                        if (countyName === 'laramie') return k === 'cheyenne';
+                        const cn = countyName.toLowerCase();
+                        if (cn === 'uinta') return k === 'evanston';
+                        if (cn === 'natrona') return k === 'casper';
+                        if (cn === 'laramie') return k === 'cheyenne';
                         return false;
                     });
                     if (locKey && locations[locKey]) {
                         const avg = locations[locKey].avg;
-                        tooltip.textContent = `${capitalize(locKey)} | avg: ${avg !== null ? avg.toFixed(1) : 'n/a'} | n=${locations[locKey].count}`;
+                        tooltip.textContent = `${countyName} Co. | avg: ${avg !== null ? avg.toFixed(1) : 'n/a'} | n=${locations[locKey].count}`;
                     } else {
-                        tooltip.textContent = capitalize(countyName);
+                        tooltip.textContent = `${countyName} Co.`;
                     }
                 } else {
                     tooltip.textContent = `FIPS ${fips}`;
@@ -252,10 +273,12 @@ async function renderMap(locations) {
                     .attr('class', 'map-marker-dot');
                 // Label
                 svg.append('text')
-                    .attr('x', x + 6).attr('y', y + 3)
-                    .attr('fill', '#6b7280')
+                    .attr('x', x + 8).attr('y', y + 4)
+                    .attr('fill', '#e2e8f0')
                     .attr('font-family', "'JetBrains Mono', monospace")
-                    .attr('font-size', '8px')
+                    .attr('font-size', '9px')
+                    .attr('font-weight', '600')
+                    .style('filter', 'drop-shadow(0 0 3px rgba(0,0,0,0.8)) drop-shadow(0 0 6px rgba(0,0,0,0.5))')
                     .text(city.toUpperCase());
             }
         });

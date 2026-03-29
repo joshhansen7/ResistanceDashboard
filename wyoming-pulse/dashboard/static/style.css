@@ -318,8 +318,8 @@ body::after {
 
 .county-path {
     fill: var(--bg-elevated);
-    stroke: var(--border);
-    stroke-width: 0.5;
+    stroke: rgba(148, 163, 184, 0.35);
+    stroke-width: 0.8;
     transition: fill 0.2s;
     cursor: pointer;
 }
