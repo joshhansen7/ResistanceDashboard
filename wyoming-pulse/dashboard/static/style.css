@@ -322,6 +322,94 @@ body::after {
     grid-row: 2;
 }
 
+/* ═══ PERIOD COMPARISON ═══ */
+.period-comparison { padding: 4px 0; }
+.period-row { display: flex; justify-content: space-between; align-items: baseline; padding: 4px 0; }
+.period-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); font-family: var(--font-data); }
+.period-value { font-family: var(--font-data); font-size: 16px; font-weight: 600; }
+.period-change-row { border-top: 1px solid var(--border-primary); margin-top: 4px; padding-top: 8px; }
+.period-change-row .period-value { font-size: 13px; }
+
+/* ═══ PERIOD CARDS ROW ═══ */
+.period-cards-row {
+    display: flex;
+    gap: var(--sp-sm);
+    margin-bottom: var(--sp-md);
+    flex-wrap: wrap;
+}
+.period-card {
+    flex: 1;
+    min-width: 160px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-primary);
+    padding: 12px 14px;
+}
+.period-card-label {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+.period-card-wsi {
+    font-family: var(--font-data);
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+.period-card-change {
+    font-family: var(--font-data);
+    font-size: 11px;
+    margin-top: 2px;
+}
+
+/* ═══ KEY ARTICLES ═══ */
+.key-article {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-primary);
+}
+.key-article:last-child { border-bottom: none; }
+.key-article-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+.key-article-score {
+    font-family: var(--font-data);
+    font-size: 12px;
+    font-weight: 600;
+}
+.key-article-meta {
+    font-family: var(--font-data);
+    font-size: 10px;
+    color: var(--text-muted);
+}
+.key-article-title {
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.4;
+}
+.key-article-title a {
+    color: var(--text-primary);
+    text-decoration: none;
+}
+.key-article-title a:hover {
+    color: var(--accent-teal);
+}
+.key-article-claims {
+    font-family: var(--font-data);
+    font-size: 10px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+    line-height: 1.4;
+}
+
+/* ═══ TOPIC BAR CHART ═══ */
+#topicBarChart {
+    min-height: 150px;
+}
+
 /* ═══ MAP ═══ */
 #wyomingMap {
     width: 100%;
@@ -787,10 +875,12 @@ a.article-link:hover {
 .pill-s2 { background: rgba(249,115,22,0.15); color: var(--sent-2); }
 .pill-s1 { background: rgba(239,68,68,0.15);  color: var(--sent-1); }
 
-.pill-elite  { background: rgba(14,165,233,0.12); color: var(--accent-blue); }
-.pill-public { background: rgba(107,114,128,0.12); color: var(--text-secondary); }
 .pill-loc    { background: rgba(20,184,166,0.1); color: var(--accent-teal); }
 .pill-state  { background: rgba(168,85,247,0.12); color: #c084fc; }
+.pill-rss    { background: rgba(14,165,233,0.12); color: var(--accent-blue); }
+.pill-web    { background: rgba(20,184,166,0.12); color: var(--accent-teal); }
+
+.queue-stats { font-size: 10px; color: var(--text-muted); font-weight: 400; margin-left: 8px; }
 
 /* ═══ FILTER BAR ═══ */
 .filter-bar {
@@ -1248,8 +1338,13 @@ a.article-link:hover {
     font-size: 11px;
 }
 
-.review-table {
+.queue-scroll-wrap {
+    max-height: 520px;
+    overflow-y: auto;
     margin-top: var(--sp-sm);
+}
+.review-table {
+    margin-top: 0;
 }
 
 .review-table input[type="checkbox"] {

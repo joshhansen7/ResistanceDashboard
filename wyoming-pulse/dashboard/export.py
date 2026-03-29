@@ -1,5 +1,5 @@
 """
-Wyoming Pulse — Export Report Generator
+Prometheus — Export Report Generator
 Generates a self-contained HTML report for sharing with leadership.
 """
 
@@ -10,6 +10,14 @@ from datetime import datetime
 from pathlib import Path
 
 import db
+import sentiment_index
+
+
+STATE_LOCATIONS = {
+    "wyoming": ["evanston", "casper", "cheyenne", "statewide"],
+    "texas": ["dallas", "statewide"],
+    "michigan": ["ann_arbor", "van_buren", "benton_harbor", "statewide"],
+}
 
 
 def generate_export_html(db_path):
@@ -24,8 +32,8 @@ def generate_export_html(db_path):
         report_data = {
             "generated": datetime.utcnow().isoformat(),
             "overview": _get_overview(conn),
+            "wsi": _get_wsi(conn),
             "trend": _get_trend(conn),
-            "voice": _get_voice(conn),
             "locations": _get_locations(conn),
             "topics": _get_topics(conn),
             "entities": _get_entities(conn),
@@ -59,34 +67,49 @@ def _get_overview(conn):
     }
 
 
+def _get_wsi(conn):
+    """Get WSI data for the report."""
+    wsi = sentiment_index.compute_wsi(conn)
+    comparison = sentiment_index.compute_period_comparison(conn)
+    state_wsi = {}
+    for state in STATE_LOCATIONS:
+        sw = sentiment_index.compute_wsi(conn, state=state)
+        state_wsi[state] = sw.get("current_wsi")
+    return {
+        "current_wsi": wsi.get("current_wsi"),
+        "raw_avg": wsi.get("raw_avg"),
+        "period_comparison": comparison,
+        "by_state": state_wsi,
+    }
+
+
 def _get_trend(conn):
-    rows = conn.execute(
-        "SELECT DATE(published_date) as date, AVG(sentiment_score) as avg, COUNT(*) as count "
-        "FROM articles WHERE analyzed = 1 AND published_date IS NOT NULL "
-        "GROUP BY DATE(published_date) ORDER BY date ASC"
-    ).fetchall()
-    return [{"date": r["date"], "avg": round(r["avg"], 2), "count": r["count"]} for r in rows]
-
-
-def _get_voice(conn):
-    result = {}
-    for voice in ("elite", "public"):
-        row = conn.execute(
-            "SELECT AVG(sentiment_score) as avg, COUNT(*) as count "
-            "FROM articles WHERE analyzed = 1 AND voice_type = ?", (voice,)
-        ).fetchone()
-        result[voice] = {"avg": round(row["avg"], 2) if row["avg"] else None, "count": row["count"]}
-    return result
+    """Get weekly WSI trend for the report."""
+    trend = sentiment_index.compute_wsi_trend(conn)
+    return [
+        {"week": t["week"], "wsi": t["wsi"], "raw": t["raw"],
+         "articles": t["articles"], "clusters": t["clusters"], "carried": t["carried"]}
+        for t in trend
+    ]
 
 
 def _get_locations(conn):
+    """Get location sentiment for all tracked states."""
     result = {}
-    for loc in ("evanston", "casper", "cheyenne", "statewide"):
-        row = conn.execute(
-            "SELECT AVG(sentiment_score) as avg, COUNT(*) as count "
-            "FROM articles WHERE analyzed = 1 AND location_relevance = ?", (loc,)
-        ).fetchone()
-        result[loc] = {"avg": round(row["avg"], 2) if row["avg"] else None, "count": row["count"]}
+    for state, locs in STATE_LOCATIONS.items():
+        for loc in locs:
+            row = conn.execute(
+                "SELECT AVG(sentiment_score) as avg, COUNT(*) as count "
+                "FROM articles WHERE analyzed = 1 AND state = ? AND location_relevance = ?",
+                (state, loc),
+            ).fetchone()
+            key = f"{state}:{loc}"
+            result[key] = {
+                "avg": round(row["avg"], 2) if row["avg"] else None,
+                "count": row["count"],
+                "state": state,
+                "location": loc,
+            }
     return result
 
 
@@ -121,7 +144,7 @@ def _get_entities(conn):
 def _get_articles(conn):
     rows = conn.execute(
         "SELECT title, source, published_date, sentiment_score, sentiment_label, "
-        "voice_type, location_relevance, key_claims "
+        "state, location_relevance, key_claims "
         "FROM articles WHERE analyzed = 1 ORDER BY published_date DESC LIMIT 50"
     ).fetchall()
     return [
@@ -129,7 +152,7 @@ def _get_articles(conn):
             "title": r["title"], "source": r["source"],
             "date": r["published_date"],
             "score": r["sentiment_score"], "label": r["sentiment_label"],
-            "voice": r["voice_type"], "location": r["location_relevance"],
+            "state": r["state"], "location": r["location_relevance"],
             "claims": r["key_claims"],
         }
         for r in rows

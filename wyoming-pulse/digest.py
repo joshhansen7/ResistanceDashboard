@@ -1,60 +1,63 @@
 """
-Wyoming Pulse — Digest Generation
+Prometheus — Digest Generation
 Generates biweekly intelligence reports from analyzed articles.
 """
 
 import json
 import logging
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import db
+import sentiment_index
 from shared import load_config, get_api_key
 
 logger = logging.getLogger("wyoming_pulse.digest")
 
 OUTPUT_DIR = Path(__file__).parent / "output" / "digests"
 
-SYNTHESIS_PROMPT = """You are an intelligence analyst producing a biweekly sentiment report about data center development in Wyoming for Prometheus Hyperscale leadership.
+SYNTHESIS_PROMPT = """You are an intelligence analyst producing a biweekly sentiment report about data center development across the United States for Prometheus Hyperscale leadership.
+
+States currently tracked: Wyoming (Evanston, Casper, Cheyenne), Texas (Dallas), Michigan (Ann Arbor, Van Buren/Wayne County, Benton Harbor/Berrien County).
 
 Given the following classified articles and aggregate data from the past {days} days, produce a concise intelligence digest. Be analytical and objective. Distinguish between signals and noise. Flag anything that represents a meaningful shift from baseline.
 
 The digest should include:
-1. SENTIMENT SNAPSHOT — Overall score, elite vs public, trend direction
-2. BY LOCATION — Brief notes on Evanston, Casper, and Cheyenne areas
-3. TOP THEMES — The 2-3 most significant narratives or developments
-4. HYPERSCALER TRACKER — Which companies were mentioned and in what context
-5. LEGISLATIVE/REGULATORY UPDATE — Any policy developments
-6. WATCH LIST — Emerging issues that bear monitoring
-7. KEY ARTICLES — The 3-5 most significant pieces with source and date
+1. NATIONAL SENTIMENT SNAPSHOT — Overall WSI score, trend direction, period comparison
+2. STATE BREAKDOWN — Brief notes on each tracked state with their WSI scores
+3. BY LOCATION — Notable developments in specific cities/counties
+4. TOP THEMES — The 2-3 most significant narratives or developments
+5. ENTITY TRACKER — Which companies were mentioned and in what context
+6. LEGISLATIVE/REGULATORY UPDATE — Any policy developments (by state)
+7. WATCH LIST — Emerging issues that bear monitoring
+8. KEY ARTICLES — The 3-5 most significant pieces with source, date, and state
 
-Keep it under 800 words. Write for busy executives who want the bottom line."""
+Keep it under 1000 words. Write for busy executives who want the bottom line."""
+
+TRACKED_STATES = ["wyoming", "texas", "michigan"]
 
 
-def compute_stats(articles):
+def compute_stats(articles, conn=None):
     """Compute aggregate statistics from a list of analyzed articles."""
     if not articles:
         return {}
 
     scores = [a["sentiment_score"] for a in articles if a["sentiment_score"] is not None]
-    elite_scores = [
-        a["sentiment_score"] for a in articles
-        if a["voice_type"] == "elite" and a["sentiment_score"] is not None
-    ]
-    public_scores = [
-        a["sentiment_score"] for a in articles
-        if a["voice_type"] == "public" and a["sentiment_score"] is not None
-    ]
 
-    # Location breakdown
-    location_scores = {}
+    # Per-state breakdown
+    state_articles = defaultdict(list)
     for a in articles:
+        state = a["state"] if a["state"] else "other"
+        state_articles[state].append(a)
+
+    # Location breakdown (grouped by state)
+    location_scores = defaultdict(lambda: defaultdict(list))
+    for a in articles:
+        state = a["state"] if a["state"] else "other"
         loc = a["location_relevance"] or "statewide"
-        if loc not in location_scores:
-            location_scores[loc] = []
         if a["sentiment_score"] is not None:
-            location_scores[loc].append(a["sentiment_score"])
+            location_scores[state][loc].append(a["sentiment_score"])
 
     # Topic frequency
     topic_counter = Counter()
@@ -74,21 +77,35 @@ def compute_stats(articles):
     def safe_avg(lst):
         return sum(lst) / len(lst) if lst else None
 
-    return {
+    stats = {
         "article_count": len(articles),
         "avg_sentiment": safe_avg(scores),
-        "elite_avg": safe_avg(elite_scores),
-        "elite_count": len(elite_scores),
-        "public_avg": safe_avg(public_scores),
-        "public_count": len(public_scores),
+        "state_counts": {s: len(arts) for s, arts in state_articles.items()},
         "location_avgs": {
-            loc: {"avg": safe_avg(s), "count": len(s)}
-            for loc, s in location_scores.items()
+            state: {
+                loc: {"avg": safe_avg(s), "count": len(s)}
+                for loc, s in locs.items()
+            }
+            for state, locs in location_scores.items()
         },
         "top_topics": topic_counter.most_common(10),
         "top_entities": entity_counter.most_common(10),
         "sentiment_distribution": dict(label_counter),
     }
+
+    # WSI scores (if connection available)
+    if conn is not None:
+        overall_wsi = sentiment_index.compute_wsi(conn)
+        stats["wsi_overall"] = overall_wsi.get("current_wsi")
+        stats["wsi_by_state"] = {}
+        for state in TRACKED_STATES:
+            state_wsi = sentiment_index.compute_wsi(conn, state=state)
+            stats["wsi_by_state"][state] = state_wsi.get("current_wsi")
+
+        comparison = sentiment_index.compute_period_comparison(conn)
+        stats["period_comparison"] = comparison
+
+    return stats
 
 
 def build_synthesis_input(articles, stats, days):
@@ -99,15 +116,32 @@ def build_synthesis_input(articles, stats, days):
     lines.append("AGGREGATE STATISTICS:")
     if stats.get("avg_sentiment") is not None:
         lines.append(f"  Overall average sentiment: {stats['avg_sentiment']:.2f}/5.0")
-    if stats.get("elite_avg") is not None:
-        lines.append(f"  Elite voice avg: {stats['elite_avg']:.2f} (n={stats['elite_count']})")
-    if stats.get("public_avg") is not None:
-        lines.append(f"  Public voice avg: {stats['public_avg']:.2f} (n={stats['public_count']})")
+    if stats.get("wsi_overall") is not None:
+        lines.append(f"  Weighted Sentiment Index (WSI): {stats['wsi_overall']:.2f}/5.0")
 
+    # WSI by state
+    wsi_by_state = stats.get("wsi_by_state", {})
+    if wsi_by_state:
+        lines.append("\n  WSI by state:")
+        for state, wsi in wsi_by_state.items():
+            count = stats.get("state_counts", {}).get(state, 0)
+            if wsi is not None:
+                lines.append(f"    {state.title()}: {wsi:.2f} (n={count})")
+
+    # Period comparison
+    pc = stats.get("period_comparison", {})
+    if pc and pc.get("change") is not None:
+        lines.append(f"\n  Period comparison: current 4wk={pc['current_4wk']:.2f}, "
+                     f"prior 4wk={pc['prior_4wk']:.2f}, change={pc['change']:+.2f} ({pc['direction']})")
+
+    # Location breakdown by state
     lines.append("\n  By location:")
-    for loc, data in stats.get("location_avgs", {}).items():
-        if data["avg"] is not None:
-            lines.append(f"    {loc}: {data['avg']:.2f} (n={data['count']})")
+    for state in TRACKED_STATES:
+        state_locs = stats.get("location_avgs", {}).get(state, {})
+        if state_locs:
+            for loc, data in state_locs.items():
+                if data["avg"] is not None:
+                    lines.append(f"    {state.title()} / {loc}: {data['avg']:.2f} (n={data['count']})")
 
     lines.append("\n  Top topics:")
     for topic, count in stats.get("top_topics", []):
@@ -121,19 +155,23 @@ def build_synthesis_input(articles, stats, days):
     for label, count in stats.get("sentiment_distribution", {}).items():
         lines.append(f"    {label}: {count}")
 
-    # Individual article summaries
+    # Individual article summaries (grouped by state)
     lines.append("\n\nARTICLE SUMMARIES:")
     lines.append("-" * 60)
-    for a in articles:
-        lines.append(f"\nSource: {a['source']}")
-        lines.append(f"Title: {a['title']}")
-        lines.append(f"Date: {a['published_date'] or 'Unknown'}")
-        lines.append(f"Sentiment: {a['sentiment_label']} ({a['sentiment_score']})")
-        lines.append(f"Voice: {a['voice_type']}")
-        lines.append(f"Location: {a['location_relevance']}")
-        if a["key_claims"]:
-            lines.append(f"Key claims: {a['key_claims']}")
-        lines.append("")
+    for state in TRACKED_STATES + ["nationwide", "other"]:
+        state_arts = [a for a in articles if (a["state"] if a["state"] else "other") == state]
+        if not state_arts:
+            continue
+        lines.append(f"\n--- {state.upper()} ({len(state_arts)} articles) ---")
+        for a in state_arts:
+            lines.append(f"\nSource: {a['source']}")
+            lines.append(f"Title: {a['title']}")
+            lines.append(f"Date: {a['published_date'] or 'Unknown'}")
+            lines.append(f"Sentiment: {a['sentiment_label']} ({a['sentiment_score']})")
+            lines.append(f"Location: {a['location_relevance']}")
+            if a["key_claims"]:
+                lines.append(f"Key claims: {a['key_claims']}")
+            lines.append("")
 
     return "\n".join(lines)
 
@@ -158,7 +196,7 @@ def generate_digest_with_api(synthesis_input, days, config):
     try:
         response = client.messages.create(
             model=model,
-            max_tokens=1500,
+            max_tokens=2000,
             system=prompt,
             messages=[{"role": "user", "content": synthesis_input}],
         )
@@ -171,25 +209,37 @@ def generate_digest_with_api(synthesis_input, days, config):
 def format_fallback_digest(stats, articles, period_start, period_end):
     """Generate a basic digest without the API (template-based)."""
     lines = [
-        f"# Wyoming Pulse — Sentiment Digest",
+        f"# Prometheus — Intelligence Digest",
         f"**Period:** {period_start} to {period_end}",
         f"**Articles analyzed:** {stats['article_count']}",
         "",
     ]
 
     if stats.get("avg_sentiment") is not None:
-        lines.append(f"## Sentiment Snapshot")
+        lines.append("## Sentiment Snapshot")
         lines.append(f"- **Overall average:** {stats['avg_sentiment']:.2f}/5.0")
-        if stats.get("elite_avg") is not None:
-            lines.append(f"- **Elite voices:** {stats['elite_avg']:.2f} (n={stats['elite_count']})")
-        if stats.get("public_avg") is not None:
-            lines.append(f"- **Public voices:** {stats['public_avg']:.2f} (n={stats['public_count']})")
+        if stats.get("wsi_overall") is not None:
+            lines.append(f"- **Weighted Sentiment Index:** {stats['wsi_overall']:.2f}/5.0")
+        pc = stats.get("period_comparison", {})
+        if pc and pc.get("change") is not None:
+            lines.append(f"- **4wk trend:** {pc['change']:+.2f} ({pc['direction']})")
+        lines.append("")
+
+    # Per-state WSI
+    wsi_by_state = stats.get("wsi_by_state", {})
+    if wsi_by_state:
+        lines.append("## State Breakdown")
+        for state, wsi in wsi_by_state.items():
+            if wsi is not None:
+                lines.append(f"- **{state.title()}:** WSI {wsi:.2f}")
         lines.append("")
 
     lines.append("## By Location")
-    for loc, data in stats.get("location_avgs", {}).items():
-        if data["avg"] is not None:
-            lines.append(f"- **{loc.title()}:** {data['avg']:.2f} (n={data['count']})")
+    for state in TRACKED_STATES:
+        state_locs = stats.get("location_avgs", {}).get(state, {})
+        for loc, data in state_locs.items():
+            if data["avg"] is not None:
+                lines.append(f"- **{state.title()} / {loc.replace('_', ' ').title()}:** {data['avg']:.2f} (n={data['count']})")
     lines.append("")
 
     if stats.get("top_topics"):
@@ -210,21 +260,21 @@ def format_fallback_digest(stats, articles, period_start, period_end):
     lines.append("")
 
     lines.append("## Key Articles")
-    # Show the 5 most notable (highest/lowest sentiment deviation from neutral)
     sorted_articles = sorted(
         [a for a in articles if a["sentiment_score"] is not None],
         key=lambda a: abs(a["sentiment_score"] - 3.0),
         reverse=True,
     )
     for a in sorted_articles[:5]:
+        state_label = (a["state"] or "").upper()[:2] if a["state"] else ""
         lines.append(
             f"- [{a['sentiment_label']}, {a['sentiment_score']:.1f}] "
-            f"**{a['title']}** — {a['source']} ({a['published_date'] or 'N/A'})"
+            f"**{a['title']}** — {a['source']} ({a['published_date'] or 'N/A'}) [{state_label}]"
         )
     lines.append("")
 
     lines.append("---")
-    lines.append("*Generated by Wyoming Pulse*")
+    lines.append("*Generated by Prometheus Intelligence Dashboard*")
     return "\n".join(lines)
 
 
@@ -263,7 +313,7 @@ def generate_digest(start_date=None, end_date=None, config=None):
     max_articles = config.get("digest", {}).get("max_articles_per_digest", 50)
     article_list = list(articles)[:max_articles]
 
-    stats = compute_stats(article_list)
+    stats = compute_stats(article_list, conn=conn)
 
     # Try API synthesis first, fall back to template
     days = (datetime.fromisoformat(end_date) - datetime.fromisoformat(start_date)).days
@@ -271,14 +321,15 @@ def generate_digest(start_date=None, end_date=None, config=None):
     narrative, api_error = generate_digest_with_api(synthesis_input, days, config)
 
     if narrative:
-        # Wrap in markdown header
+        wsi_str = f"**WSI:** {stats.get('wsi_overall', 0):.2f}/5.0\n" if stats.get("wsi_overall") else ""
         content = (
-            f"# Wyoming Pulse — Intelligence Digest\n"
+            f"# Prometheus — Intelligence Digest\n"
             f"**Period:** {start_date} to {end_date}\n"
             f"**Articles analyzed:** {stats['article_count']}\n"
-            f"**Overall sentiment:** {stats.get('avg_sentiment', 0):.2f}/5.0\n\n"
+            f"**Overall sentiment:** {stats.get('avg_sentiment', 0):.2f}/5.0\n"
+            f"{wsi_str}\n"
             f"---\n\n{narrative}\n\n"
-            f"---\n*Generated by Wyoming Pulse on {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}*"
+            f"---\n*Generated by Prometheus Intelligence Dashboard on {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}*"
         )
     else:
         if api_error:
@@ -316,6 +367,8 @@ def generate_digest(start_date=None, end_date=None, config=None):
     print(f"Articles:         {len(article_list)}")
     if stats.get("avg_sentiment") is not None:
         print(f"Avg sentiment:    {stats['avg_sentiment']:.2f}/5.0")
+    if stats.get("wsi_overall") is not None:
+        print(f"WSI:              {stats['wsi_overall']:.2f}/5.0")
 
     return filename
 

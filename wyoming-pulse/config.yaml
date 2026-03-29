@@ -1,90 +1,130 @@
-# Wyoming Pulse Configuration
-# Sentiment tracking for data center development in Wyoming
+# Prometheus Resistance Dashboard — Configuration
+# Multi-state sentiment tracking for data center development
 
-feeds:
-  - name: "Casper Star-Tribune"
-    url: "https://trib.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc"
-    enabled: true
+# ──────────────────────────────────────────────
+# Per-state configuration: feeds, keywords, locations, search queries
+# ──────────────────────────────────────────────
+states:
+  wyoming:
+    feeds:
+      - name: "Casper Star-Tribune"
+        url: "https://trib.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc"
+        enabled: true
+      - name: "WyoFile"
+        url: "https://wyofile.com/feed/"
+        enabled: true
+      - name: "Wyoming Tribune Eagle"
+        url: "https://www.wyomingnews.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc"
+        enabled: true
+      - name: "Wyoming Public Media"
+        url: "https://www.wyomingpublicmedia.org/rss.xml"
+        enabled: true
+      - name: "Oil City News"
+        url: "https://oilcity.news/feed/"
+        enabled: true
+      - name: "SweetwaterNOW"
+        url: "https://sweetwaternow.com/feed/"
+        enabled: true
+      - name: "Cowboy State Daily"
+        url: ""
+        enabled: false  # No public RSS; add articles manually
+    keywords:
+      primary: ["data center", "hyperscale", "server farm"]
+      companies: ["Crusoe", "Tallgrass", "Project Jade"]
+      secondary: ["large load", "megawatt", "gigawatt", "industrial siting", "ratepayer", "energy demand", "grid capacity", "cooling water"]
+    locations:
+      evanston: ["Evanston", "Uinta County", "southwest Wyoming"]
+      casper: ["Casper", "Natrona County", "central Wyoming"]
+      cheyenne: ["Cheyenne", "Laramie County", "southeast Wyoming"]
+    web_search_queries:
+      - '"Wyoming data center"'
+      - '"Prometheus Hyperscale" Wyoming'
+      - '"hyperscale" Wyoming energy'
 
-  - name: "WyoFile"
-    url: "https://wyofile.com/feed/"
-    enabled: true
+  texas:
+    feeds:
+      - name: "Texas Tribune"
+        url: "https://feeds.texastribune.org/feeds/main/"
+        enabled: true
+      - name: "Dallas Observer"
+        url: "https://www.dallasobserver.com/feed"
+        enabled: true
+      - name: "Dallas Business Journal"
+        url: "https://feeds.bizjournals.com/bizj_dallas"
+        enabled: true
+    keywords:
+      primary: ["data center", "hyperscale", "server farm"]
+      companies: ["Equinix", "CyrusOne", "DataBank", "QTS", "Skybox", "Stream Data Centers", "Stack Infrastructure", "Yondr"]
+      secondary: ["ERCOT", "interconnection", "large load", "megawatt", "grid capacity", "cooling water", "power purchase"]
+    locations:
+      dallas: ["Dallas", "Dallas-Fort Worth", "DFW", "Ellis County", "Lancaster", "Red Oak", "Venus"]
+    web_search_queries:
+      - '"data center" Dallas OR "Dallas-Fort Worth"'
+      - 'ERCOT "data center" Texas'
 
-  - name: "Wyoming Tribune Eagle"
-    url: "https://www.wyomingnews.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc"
-    enabled: true
+  michigan:
+    feeds:
+      - name: "Bridge Michigan"
+        url: "https://bridgemi.com/rss.xml"
+        enabled: true
+      - name: "Planet Detroit"
+        url: "https://planetdetroit.org/feed/"
+        enabled: true
+      - name: "Herald-Palladium"
+        url: "https://www.heraldpalladium.com/search/?f=rss&t=article&c=news/local&l=25&s=start_time&sd=desc"
+        enabled: true
+      - name: "Gander Newsroom"
+        url: "https://gandernewsroom.com/feed/"
+        enabled: true
+    keywords:
+      primary: ["data center", "hyperscale", "server farm"]
+      companies: ["Google", "Oracle", "OpenAI", "Panattoni", "Related Digital", "Green Chile Ventures"]
+      secondary: ["DTE Energy", "MPSC", "large load", "megawatt", "cooling water", "Project Cannoli", "Consumers Energy"]
+    locations:
+      ann_arbor: ["Ann Arbor", "Saline Township", "Washtenaw County"]
+      van_buren: ["Van Buren Township", "Wayne County"]
+      benton_harbor: ["Benton Harbor", "Benton Township", "Berrien County", "St. Joseph"]
+    web_search_queries:
+      - '"data center" Michigan'
+      - '"data center" "Van Buren Township" OR "Wayne County" Michigan'
+      - '"data center" "Benton Harbor" OR "Berrien County"'
 
-  - name: "Wyoming Public Media"
-    url: "https://www.wyomingpublicmedia.org/rss.xml"
-    # Alternate feeds by section:
-    # https://www.wyomingpublicmedia.org/natural-resources-energy/rss.xml
-    # https://www.wyomingpublicmedia.org/wyoming-economy/rss.xml
-    enabled: true
+# ──────────────────────────────────────────────
+# Global keywords — apply to ALL states
+# ──────────────────────────────────────────────
+global_keywords:
+  primary: ["Prometheus Hyperscale", "data centre"]
+  companies: ["Microsoft", "Meta", "Amazon", "AWS"]
 
-  - name: "Oil City News"
-    url: "https://oilcity.news/feed/"
-    enabled: true
+# ──────────────────────────────────────────────
+# Pipeline settings
+# ──────────────────────────────────────────────
+pipeline:
+  auto_approve_threshold: null  # null = disabled. Set 7-10 to auto-approve above threshold.
+  relevance_model: "claude-haiku-4-5-20251001"
+  default_days_back: 30
 
-  - name: "SweetwaterNOW"
-    url: "https://sweetwaternow.com/feed/"
-    enabled: true
-
-  - name: "Cowboy State Daily"
-    url: ""
-    # CSD does NOT publish a public RSS feed. Leave URL empty.
-    # CSD articles should be added manually via manual_input.py
-    enabled: false
-
-# Keyword filters — articles must match at least one keyword group.
-# Matching is case-insensitive.
-keywords:
-  primary:  # High-confidence: any single match = relevant
-    - "data center"
-    - "data centre"
-    - "hyperscale"
-    - "hyperscaler"
-    - "Prometheus Hyperscale"
-    - "server farm"
-  companies:  # Match only when combined with Wyoming context
-    - "Crusoe"
-    - "Tallgrass"
-    - "Microsoft"
-    - "Meta"
-    - "Project Jade"
-  secondary:  # Broader terms — require co-occurrence with a location or primary term
-    - "large load"
-    - "megawatt"
-    - "gigawatt"
-    - "industrial siting"
-    - "ratepayer"
-    - "energy demand"
-    - "grid capacity"
-    - "cooling water"
-
-# Location keywords for geographic tagging
-locations:
-  evanston: ["Evanston", "Uinta County", "southwest Wyoming"]
-  casper: ["Casper", "Natrona County", "central Wyoming"]
-  cheyenne: ["Cheyenne", "Laramie County", "southeast Wyoming"]
-  statewide: []  # Default if no specific location matched
-
+# ──────────────────────────────────────────────
 # Anthropic API
-# NOTE: Set your API key as an environment variable:
-#   export ANTHROPIC_API_KEY="sk-ant-..."
-# Do NOT hardcode the key here.
+# ──────────────────────────────────────────────
+# Set your API key: export ANTHROPIC_API_KEY="sk-ant-..."
 anthropic:
   classification_model: "claude-haiku-4-5-20251001"
   synthesis_model: "claude-sonnet-4-5-20250929"
   max_retries: 3
   timeout_seconds: 30
 
+# ──────────────────────────────────────────────
 # Digest settings
+# ──────────────────────────────────────────────
 digest:
   interval_days: 14
   output_format: "markdown"
   max_articles_per_digest: 50
 
+# ──────────────────────────────────────────────
 # Scheduling
+# ──────────────────────────────────────────────
 schedule:
   feed_check_interval_hours: 12
   digest_generation_day: "Monday"

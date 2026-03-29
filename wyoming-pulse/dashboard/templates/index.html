@@ -102,20 +102,33 @@
                         <span class="m-value" id="metricSentiment">--</span>
                     </div>
                     <div class="metric-row">
-                        <span class="m-label">Elite Avg</span>
-                        <span class="m-value sm" id="metricElite">--</span>
+                        <span class="m-label">WSI</span>
+                        <span class="m-value" id="metricWSI">--</span>
                     </div>
                     <div class="metric-row">
-                        <span class="m-label">Public Avg</span>
-                        <span class="m-value sm" id="metricPublic">--</span>
+                        <span class="m-label">4wk Trend</span>
+                        <span class="m-value sm" id="metricTrend">--</span>
                     </div>
                 </div>
 
-                <!-- Voice (right bottom) -->
+                <!-- Period Comparison (right bottom) -->
                 <div class="voice-panel">
-                    <div class="sh">Voice Comparison</div>
-                    <canvas id="voiceChart"></canvas>
-                    <div class="no-data" id="voiceNoData" style="display:none">No voice data</div>
+                    <div class="sh">Period Comparison</div>
+                    <div class="period-comparison" id="periodComparison">
+                        <div class="period-row">
+                            <span class="period-label">Current 4wk</span>
+                            <span class="period-value" id="periodCurrent">--</span>
+                        </div>
+                        <div class="period-row">
+                            <span class="period-label">Prior 4wk</span>
+                            <span class="period-value" id="periodPrior">--</span>
+                        </div>
+                        <div class="period-row period-change-row">
+                            <span class="period-label">Change</span>
+                            <span class="period-value" id="periodChange">--</span>
+                        </div>
+                    </div>
+                    <div class="no-data" id="periodNoData" style="display:none">Insufficient data</div>
                 </div>
             </div>
 
@@ -132,21 +145,64 @@
     <div id="page-sentiment" class="page">
         <div class="page-header">
             <h1>Sentiment</h1>
-            <span class="page-sub">heatmaps &amp; distribution</span>
+            <span class="page-sub">intelligence deep-dive</span>
+            <select id="sentStateFilter" class="dash-state-filter" onchange="renderSentiment()">
+                <option value="">All States</option>
+                <option value="wyoming">Wyoming</option>
+                <option value="texas">Texas</option>
+                <option value="michigan">Michigan</option>
+            </select>
         </div>
         <div class="page-content">
+
+            <!-- A: WSI Trend Chart -->
+            <div class="chart-panel">
+                <div class="sh">Sentiment Index Trend</div>
+                <canvas id="sentTrendChart"></canvas>
+                <div class="no-data" id="sentTrendNoData" style="display:none">Insufficient data</div>
+            </div>
+
+            <!-- B: Period Comparison Cards -->
+            <div class="period-cards-row" id="periodCards"></div>
+
+            <!-- C: Location x Time Heatmap -->
             <div class="heatmap-wrap">
                 <div class="sh">Location &times; Time</div>
                 <div class="heatmap" id="locationHeatmap"></div>
                 <div class="no-data" id="locHeatNoData" style="display:none">No location-time data</div>
             </div>
 
-            <div class="heatmap-wrap">
-                <div class="sh">Topic &times; Time</div>
-                <div class="heatmap" id="topicHeatmap"></div>
-                <div class="no-data" id="topicHeatNoData" style="display:none">No topic-time data</div>
+            <!-- D: Topic Sentiment Breakdown -->
+            <div class="chart-panel">
+                <div class="sh">Topic Sentiment Breakdown</div>
+                <canvas id="topicBarChart"></canvas>
+                <div class="no-data" id="topicBarNoData" style="display:none">No topic data</div>
             </div>
 
+            <!-- E: Entity Tracker -->
+            <div class="table-wrap">
+                <div class="sh">Entity Tracker</div>
+                <table class="dt" id="entityTable">
+                    <thead>
+                        <tr>
+                            <th style="cursor:pointer" onclick="sortEntityTable('name')">Entity</th>
+                            <th style="cursor:pointer" onclick="sortEntityTable('count')">Mentions</th>
+                            <th style="cursor:pointer" onclick="sortEntityTable('avg_sentiment')">Avg Sentiment</th>
+                        </tr>
+                    </thead>
+                    <tbody id="entityBody"></tbody>
+                </table>
+                <div class="no-data" id="entityNoData" style="display:none">No entity data</div>
+            </div>
+
+            <!-- F: Key Articles -->
+            <div class="table-wrap">
+                <div class="sh">Key Articles</div>
+                <div id="keyArticlesList"></div>
+                <div class="no-data" id="keyArticlesNoData" style="display:none">No articles</div>
+            </div>
+
+            <!-- G: Distribution -->
             <div class="chart-panel">
                 <div class="sh">Distribution</div>
                 <div style="max-width:360px;margin:0 auto">
@@ -154,6 +210,7 @@
                 </div>
                 <div class="no-data" id="distNoData" style="display:none">No data</div>
             </div>
+
         </div>
     </div>
 
@@ -210,7 +267,6 @@
                             <th>Sentiment</th>
                             <th>State</th>
                             <th>Region</th>
-                            <th>Voice</th>
                         </tr>
                     </thead>
                     <tbody id="articleBody"></tbody>
@@ -263,41 +319,101 @@
         </div>
         <div class="page-content">
 
-            <!-- Pending Review Queue -->
-            <div class="control-section" id="pendingQueueSection">
-                <div class="sh">Pending Review Queue</div>
-                <p class="control-desc">Articles from previous web searches awaiting approval. Reviewing or discarding batches also unblocks future searches from finding the same articles.</p>
-                <div id="pendingQueueList">
-                    <div class="queue-empty" id="pendingQueueEmpty" style="display:none">No pending batches — queue is clear.</div>
-                </div>
-                <!-- Batch article review panel (shared with web search results) -->
-                <div id="batchReviewPanel" style="display:none">
-                    <div class="review-header">
-                        <div class="review-summary">
-                            Batch <span id="batchReviewId" style="font-family:var(--font-data);color:var(--accent-teal)"></span> &mdash;
-                            <span id="batchReviewCount">0</span> articles &mdash;
-                            <span id="batchReviewSelected">0</span> selected
-                        </div>
-                        <div class="review-actions">
-                            <button class="btn-action btn-approve" onclick="approveBatchSelected()">Approve Selected</button>
-                            <button class="btn-action btn-reject" onclick="rejectBatchUnselected()">Reject Unselected</button>
-                            <button class="btn-action btn-discard" onclick="discardCurrentBatch()">Discard Batch</button>
-                        </div>
+            <!-- Unified Review Queue -->
+            <div class="control-section" id="reviewQueueSection">
+                <div class="sh">Review Queue <span class="queue-stats" id="queueStats"></span></div>
+                <p class="control-desc">All pending articles from RSS feeds and web searches, sorted by relevance score. Check articles to approve, then use the action buttons.</p>
+                <div class="review-header" id="queueActions" style="display:none">
+                    <div class="review-summary">
+                        <span id="queueTotal">0</span> pending &mdash;
+                        <span id="queueSelected">0</span> selected
                     </div>
-                    <table class="dt review-table" id="batchReviewTable">
+                    <div class="review-actions">
+                        <button class="btn-action btn-approve" onclick="approveQueueSelected()">Approve Selected</button>
+                        <button class="btn-action btn-reject" onclick="rejectQueueUnselected()">Reject Unselected</button>
+                        <button class="btn-action" onclick="approveAboveThreshold()" title="Approve all articles with relevance score >= 7">Approve All &ge; 7</button>
+                        <button class="btn-action btn-discard" onclick="clearRejected()">Clear Rejected</button>
+                    </div>
+                </div>
+                <div class="queue-scroll-wrap">
+                <table class="dt review-table" id="queueTable" style="display:none">
+                    <thead>
+                        <tr>
+                            <th style="width:30px"><input type="checkbox" id="queueSelectAll" onchange="toggleAllQueue(this.checked)"></th>
+                            <th style="width:50px">Score</th>
+                            <th>Title</th>
+                            <th>Source</th>
+                            <th>State</th>
+                            <th>Date</th>
+                            <th>Type</th>
+                        </tr>
+                    </thead>
+                    <tbody id="queueBody"></tbody>
+                </table>
+                </div>
+                <div class="no-data" id="queueEmpty" style="display:none">Queue is clear — no pending articles.</div>
+                <div class="task-status" id="queueStatus"></div>
+            </div>
+
+            <!-- Pending Analysis -->
+            <div class="control-section" id="analysisQueueSection">
+                <div class="sh">Pending Analysis <span class="queue-stats" id="analysisCount"></span></div>
+                <p class="control-desc" id="analysisDesc">Approved articles awaiting sentiment analysis via Claude API.</p>
+                <div class="queue-scroll-wrap" style="max-height:280px">
+                    <table class="dt" id="analysisTable" style="display:none">
                         <thead>
                             <tr>
-                                <th style="width:30px"><input type="checkbox" id="batchSelectAll" onchange="toggleAllBatch(this.checked)"></th>
-                                <th style="width:50px">Score</th>
                                 <th>Title</th>
                                 <th>Source</th>
                                 <th>Date</th>
-                                <th>Reason</th>
+                                <th>State</th>
                             </tr>
                         </thead>
-                        <tbody id="batchReviewBody"></tbody>
+                        <tbody id="analysisBody"></tbody>
                     </table>
-                    <div class="batch-review-status" id="batchReviewStatus"></div>
+                </div>
+                <div class="no-data" id="analysisEmpty" style="display:none">All articles have been analyzed.</div>
+                <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+                    <button class="btn-action" id="btnRunAnalysis" onclick="runTask('analysis')">Run Analysis</button>
+                    <div class="task-status" id="statusAnalysis"></div>
+                </div>
+            </div>
+
+            <!-- Web Search -->
+            <div class="control-section">
+                <div class="sh">Web Search</div>
+                <p class="control-desc">Search Google News for articles across all tracked states. Results are scored for relevance and added to the review queue.</p>
+                <div class="control-form">
+                    <div class="form-group">
+                        <label>Search Query <span style="color:var(--text-muted);font-weight:normal">(leave blank for per-state defaults)</span></label>
+                        <input type="text" id="ctrlSearchQuery" placeholder="Custom query or leave blank for all states">
+                    </div>
+                    <div class="form-row" style="grid-template-columns: 1fr 1fr auto;">
+                        <div class="form-group">
+                            <label>Time Range</label>
+                            <select id="ctrlSearchDays">
+                                <option value="7">Last 7 days</option>
+                                <option value="14">Last 14 days</option>
+                                <option value="30" selected>Last 30 days</option>
+                                <option value="60">Last 60 days</option>
+                                <option value="90">Last 90 days</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>State</label>
+                            <select id="ctrlSearchState">
+                                <option value="">All States</option>
+                                <option value="wyoming">Wyoming</option>
+                                <option value="texas">Texas</option>
+                                <option value="michigan">Michigan</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="justify-content: flex-end;">
+                            <label>&nbsp;</label>
+                            <button type="button" class="btn-action" id="btnWebsearch" onclick="runWebSearch()">Search</button>
+                        </div>
+                    </div>
+                    <div class="task-status" id="statusWebsearch"></div>
                 </div>
             </div>
 
@@ -342,62 +458,6 @@
                 </form>
             </div>
 
-            <!-- Web Search -->
-            <div class="control-section">
-                <div class="sh">Web Search</div>
-                <p class="control-desc">Search Google News for articles. Results are scored for relevance by Claude and queued for your review.</p>
-                <div class="control-form">
-                    <div class="form-group">
-                        <label>Search Query</label>
-                        <input type="text" id="ctrlSearchQuery" placeholder="&quot;Wyoming data center&quot; OR &quot;Prometheus Hyperscale&quot;">
-                    </div>
-                    <div class="form-row" style="grid-template-columns: 1fr auto auto;">
-                        <div class="form-group">
-                            <label>Time Range</label>
-                            <select id="ctrlSearchDays">
-                                <option value="7">Last 7 days</option>
-                                <option value="14">Last 14 days</option>
-                                <option value="30" selected>Last 30 days</option>
-                                <option value="60">Last 60 days</option>
-                                <option value="90">Last 90 days</option>
-                            </select>
-                        </div>
-                        <div class="form-group" style="justify-content: flex-end;">
-                            <label>&nbsp;</label>
-                            <button type="button" class="btn-action" id="btnWebsearch" onclick="runWebSearch()">Search</button>
-                        </div>
-                    </div>
-                    <div class="task-status" id="statusWebsearch"></div>
-                </div>
-
-                <!-- Review Table (hidden until results arrive) -->
-                <div id="reviewSection" style="display:none;">
-                    <div class="review-header">
-                        <div class="review-summary">
-                            <span id="reviewCount">0</span> articles found &mdash;
-                            <span id="reviewSelected">0</span> selected
-                        </div>
-                        <div class="review-actions">
-                            <button class="btn-action btn-approve" onclick="approveSelected()">Approve Selected</button>
-                            <button class="btn-action btn-reject" onclick="rejectSelected()">Reject Unselected</button>
-                        </div>
-                    </div>
-                    <table class="dt review-table" id="reviewTable">
-                        <thead>
-                            <tr>
-                                <th style="width:30px"><input type="checkbox" id="selectAll" onchange="toggleAllPending(this.checked)"></th>
-                                <th style="width:50px">Score</th>
-                                <th>Title</th>
-                                <th>Source</th>
-                                <th>Date</th>
-                                <th>Reason</th>
-                            </tr>
-                        </thead>
-                        <tbody id="reviewBody"></tbody>
-                    </table>
-                </div>
-            </div>
-
             <!-- Operations Grid -->
             <div class="control-grid">
                 <div class="control-section">
@@ -405,12 +465,6 @@
                     <p class="control-desc">Fetch all configured RSS feeds and import matching articles.</p>
                     <button class="btn-action" id="btnIngest" onclick="runTask('ingest')">Run Ingestion</button>
                     <div class="task-status" id="statusIngest"></div>
-                </div>
-                <div class="control-section">
-                    <div class="sh">Sentiment Analysis</div>
-                    <p class="control-desc">Analyze pending articles via Claude API for sentiment classification.</p>
-                    <button class="btn-action" id="btnAnalysis" onclick="runTask('analysis')">Run Analysis</button>
-                    <div class="task-status" id="statusAnalysis"></div>
                 </div>
                 <div class="control-section">
                     <div class="sh">Generate Digest</div>

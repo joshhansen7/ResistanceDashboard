@@ -19,7 +19,6 @@ Analyze the following article and return a JSON object (no markdown fences, no p
 {
   "sentiment_score": <float 1.0-5.0>,
   "sentiment_label": "<strongly_negative|slightly_negative|neutral|slightly_positive|strongly_positive>",
-  "voice_type": "<elite|public>",
   "state": "<wyoming|texas|michigan|nationwide|other>",
   "location_relevance": "<statewide|evanston|casper|cheyenne|dallas|ann_arbor|van_buren|benton_harbor|nationwide|other>",
   "topic_tags": ["<from: energy_ratepayer, water, jobs_economic, land_use_wildlife, regulation_transparency, tax_incentives, national_security_ai, community_impact>"],
@@ -38,10 +37,6 @@ Sentiment scale:
 3.0 = Neutral (factual reporting, balanced, no clear lean)
 4.0 = Slightly positive (cautious optimism, emphasis on benefits with caveats)
 5.0 = Strongly positive (enthusiastic support, boosterism, economic development framing)
-
-Voice types:
-- "elite": legislators, officials, editorial boards, organization spokespeople, academics
-- "public": comments, social media posts, letters to editor, community members at public meetings
 
 Be precise. A factual news article that quotes both supporters and opponents is neutral (3.0). An editorial urging caution is slightly negative (2.0). A county commissioner's enthusiastic endorsement is strongly positive (5.0)."""
 
@@ -68,7 +63,7 @@ def parse_analysis_response(response_text):
         return None
 
     # Validate required fields
-    required = ["sentiment_score", "sentiment_label", "voice_type", "state", "location_relevance"]
+    required = ["sentiment_score", "sentiment_label", "state", "location_relevance"]
     for field in required:
         if field not in result:
             logger.warning("Missing required field in response: %s", field)

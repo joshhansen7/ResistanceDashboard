@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, current_app, jsonify, request, send_file
 
 import db
+import sentiment_index
 
 logger = logging.getLogger("wyoming_pulse.api")
 
@@ -167,25 +168,26 @@ def sentiment_trend():
 
 
 # ──────────────────────────────────────────────
-# /api/voice-comparison
+# /api/sentiment-index
 # ──────────────────────────────────────────────
-@bp.route("/voice-comparison")
-def voice_comparison():
+@bp.route("/sentiment-index")
+def sentiment_index_endpoint():
+    """Weighted Sentiment Index: current value, trend, and period comparison."""
     conn = get_conn()
     try:
-        where, params = _state_filter()
-        result = {}
-        for voice in ("elite", "public"):
-            row = conn.execute(
-                f"SELECT AVG(sentiment_score) as avg, COUNT(*) as count "
-                f"FROM articles WHERE {where} AND voice_type = ?",
-                params + [voice],
-            ).fetchone()
-            result[voice] = {
-                "avg": round(row["avg"], 2) if row["avg"] else None,
-                "count": row["count"],
-            }
-        return jsonify(result)
+        state = request.args.get("state") or None
+        weeks_back = request.args.get("weeks_back", 26, type=int)
+
+        wsi = sentiment_index.compute_wsi(conn, state=state, weeks_back=weeks_back)
+        trend = sentiment_index.compute_wsi_trend(conn, state=state, weeks_back=weeks_back)
+        comparison = sentiment_index.compute_period_comparison(conn, state=state)
+
+        return jsonify({
+            "current_wsi": wsi["current_wsi"],
+            "raw_avg": wsi["raw_avg"],
+            "trend": trend,
+            "period_comparison": comparison,
+        })
     finally:
         conn.close()
 
@@ -283,20 +285,25 @@ def topics():
 def entities():
     conn = get_conn()
     try:
+        where, params = _state_filter()
         rows = conn.execute(
-            "SELECT entities_mentioned FROM articles WHERE analyzed = 1"
+            f"SELECT entities_mentioned, sentiment_score FROM articles WHERE {where}",
+            params,
         ).fetchall()
 
-        entity_counts = defaultdict(int)
+        entity_data = defaultdict(lambda: {"count": 0, "scores": []})
         for row in rows:
             ents = json.loads(row["entities_mentioned"]) if row["entities_mentioned"] else []
             for e in ents:
-                entity_counts[e] += 1
+                entity_data[e]["count"] += 1
+                if row["sentiment_score"] is not None:
+                    entity_data[e]["scores"].append(row["sentiment_score"])
 
-        entities_list = [
-            {"name": name, "count": count}
-            for name, count in sorted(entity_counts.items(), key=lambda x: x[1], reverse=True)
-        ]
+        entities_list = []
+        for name, data in sorted(entity_data.items(), key=lambda x: x[1]["count"], reverse=True):
+            avg = round(sum(data["scores"]) / len(data["scores"]), 2) if data["scores"] else None
+            entities_list.append({"name": name, "count": data["count"], "avg_sentiment": avg})
+
         return jsonify({"entities": entities_list})
     finally:
         conn.close()
@@ -553,6 +560,32 @@ def control_add_article():
         conn.close()
 
 
+@bp.route("/control/unanalyzed")
+def control_unanalyzed():
+    """Get articles approved but not yet analyzed."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, title, source, published_date, state, url "
+            "FROM articles WHERE analyzed = 0 "
+            "ORDER BY ingested_date DESC"
+        ).fetchall()
+        articles = [
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "source": r["source"],
+                "published_date": r["published_date"],
+                "state": r["state"],
+                "url": r["url"],
+            }
+            for r in rows
+        ]
+        return jsonify({"articles": articles, "total": len(articles)})
+    finally:
+        conn.close()
+
+
 @bp.route("/control/run-ingest", methods=["POST"])
 def control_run_ingest():
     """Trigger RSS feed ingestion in background."""
@@ -579,17 +612,18 @@ def control_run_digest():
 
 @bp.route("/control/run-websearch", methods=["POST"])
 def control_run_websearch():
-    """Trigger web search with optional query and date range."""
+    """Trigger web search with optional query, date range, and state."""
     import websearch
     data = request.get_json(silent=True) or {}
     query = (data.get("query") or "").strip() or None
+    state = (data.get("state") or "").strip() or None
     days_back = data.get("days_back", 30)
     try:
         days_back = int(days_back)
     except (ValueError, TypeError):
         days_back = 30
     task_id = _run_in_background("websearch", websearch.run_websearch,
-                                  query=query, days_back=days_back)
+                                  query=query, days_back=days_back, state=state)
     return jsonify({"task_id": task_id})
 
 
@@ -641,11 +675,30 @@ def control_discard_batch():
 
 @bp.route("/control/pending")
 def control_pending():
-    """Get pending articles for review."""
+    """Get pending articles for review (unified queue)."""
     search_id = request.args.get("search_id", "")
+    state_filter = request.args.get("state", "")
+    source_type_filter = request.args.get("source_type", "")
     conn = get_conn()
     try:
-        rows = db.get_pending_articles(conn, search_id or None)
+        where = "status = 'pending'"
+        params = []
+        if search_id:
+            where += " AND search_id = ?"
+            params.append(search_id)
+        if state_filter:
+            where += " AND state = ?"
+            params.append(state_filter)
+        if source_type_filter:
+            where += " AND source_type = ?"
+            params.append(source_type_filter)
+
+        rows = conn.execute(
+            f"SELECT * FROM pending_articles WHERE {where} "
+            f"ORDER BY COALESCE(relevance_score, 0) DESC, created_date DESC",
+            params,
+        ).fetchall()
+
         articles = []
         for r in rows:
             articles.append({
@@ -662,8 +715,18 @@ def control_pending():
                 "relevance_score": r["relevance_score"],
                 "relevance_reason": r["relevance_reason"],
                 "created_date": r["created_date"],
+                "source_type": r["source_type"] if "source_type" in r.keys() else "websearch",
+                "state": r["state"] if "state" in r.keys() else None,
             })
-        return jsonify({"articles": articles, "total": len(articles)})
+
+        # Queue stats
+        stats_rows = conn.execute(
+            "SELECT source_type, COUNT(*) as c FROM pending_articles "
+            "WHERE status = 'pending' GROUP BY source_type"
+        ).fetchall()
+        stats = {r["source_type"] or "websearch": r["c"] for r in stats_rows}
+
+        return jsonify({"articles": articles, "total": len(articles), "stats": stats})
     finally:
         conn.close()
 
@@ -678,6 +741,31 @@ def control_approve():
     conn = get_conn()
     try:
         approved = db.approve_pending_articles(conn, article_ids)
+        return jsonify({"success": True, "approved": approved})
+    finally:
+        conn.close()
+
+
+@bp.route("/control/approve-above", methods=["POST"])
+def control_approve_above():
+    """Approve all pending articles with relevance score >= threshold."""
+    data = request.get_json(force=True)
+    threshold = data.get("threshold", 7)
+    try:
+        threshold = float(threshold)
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "error": "Invalid threshold"}), 400
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id FROM pending_articles "
+            "WHERE status = 'pending' AND relevance_score >= ?",
+            (threshold,),
+        ).fetchall()
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return jsonify({"success": True, "approved": 0})
+        approved = db.approve_pending_articles(conn, ids)
         return jsonify({"success": True, "approved": approved})
     finally:
         conn.close()

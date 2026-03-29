@@ -441,10 +441,9 @@ async function renderDashboard() {
         const stateFilter = (document.getElementById('dashStateFilter') || {}).value || '';
         const qs = stateFilter ? `?state=${stateFilter}` : '';
 
-        const [overview, trend, voice, stateSentiment] = await Promise.all([
+        const [overview, wsiData, stateSentiment] = await Promise.all([
             fetchJSON(`/api/overview${qs}`),
-            fetchJSON(`/api/sentiment-trend${qs}`),
-            fetchJSON(`/api/voice-comparison${qs}`),
+            fetchJSON(`/api/sentiment-index${qs}`),
             fetchJSON('/api/state-sentiment'),
         ]);
 
@@ -458,17 +457,20 @@ async function renderDashboard() {
             avgEl.style.color = sentimentColor(overview.avg_sentiment);
         } else { avgEl.textContent = '--'; }
 
-        const eliteEl = document.getElementById('metricElite');
-        if (voice.elite.avg !== null) {
-            eliteEl.textContent = voice.elite.avg.toFixed(2);
-            eliteEl.style.color = sentimentColor(voice.elite.avg);
-        } else { eliteEl.textContent = '--'; }
+        const wsiEl = document.getElementById('metricWSI');
+        if (wsiData.current_wsi !== null) {
+            wsiEl.textContent = wsiData.current_wsi.toFixed(2);
+            wsiEl.style.color = sentimentColor(wsiData.current_wsi);
+        } else { wsiEl.textContent = '--'; }
 
-        const pubEl = document.getElementById('metricPublic');
-        if (voice.public.avg !== null) {
-            pubEl.textContent = voice.public.avg.toFixed(2);
-            pubEl.style.color = sentimentColor(voice.public.avg);
-        } else { pubEl.textContent = '--'; }
+        const trendEl = document.getElementById('metricTrend');
+        const pc = wsiData.period_comparison;
+        if (pc && pc.change !== null) {
+            const arrow = pc.direction === 'improving' ? '\u25B2' : pc.direction === 'declining' ? '\u25BC' : '\u25C6';
+            const color = pc.direction === 'improving' ? 'var(--sent-5)' : pc.direction === 'declining' ? 'var(--sent-1)' : 'var(--sent-3)';
+            trendEl.textContent = `${arrow} ${pc.change > 0 ? '+' : ''}${pc.change.toFixed(2)}`;
+            trendEl.style.color = color;
+        } else { trendEl.textContent = '--'; }
 
         // Sync
         document.getElementById('lastSync').textContent = overview.last_ingestion ? timeAgo(overview.last_ingestion) : '--';
@@ -478,19 +480,20 @@ async function renderDashboard() {
             renderUSMap(stateSentiment);
         }
 
-        // Charts
-        renderTrendChart(trend.data);
-        renderVoiceChart(voice);
+        // Charts + Period Comparison
+        renderWSITrendChart(wsiData.trend);
+        renderPeriodComparison(wsiData.period_comparison);
 
     } catch (err) { console.error('Dashboard error:', err); }
 }
 
-function renderTrendChart(data) {
+function renderWSITrendChart(trend) {
     const canvas = document.getElementById('trendChart');
     const noData = document.getElementById('trendNoData');
     destroyChart('trend');
 
-    if (!data || data.length === 0) {
+    const realData = trend ? trend.filter(t => t.wsi !== null) : [];
+    if (realData.length === 0) {
         canvas.style.display = 'none';
         noData.style.display = 'block';
         return;
@@ -501,45 +504,156 @@ function renderTrendChart(data) {
     charts.trend = new Chart(canvas, {
         type: 'line',
         data: {
-            labels: data.map(d => d.date),
-            datasets: [{
-                data: data.map(d => d.avg_sentiment),
-                borderColor: '#14b8a6',
-                backgroundColor: 'transparent',
-                fill: false,
-                tension: 0.2,
-                pointRadius: data.length === 1 ? 4 : 2,
-                pointHoverRadius: 5,
-                pointBackgroundColor: '#14b8a6',
-                pointBorderColor: '#050810',
-                pointBorderWidth: 1,
-                borderWidth: 1.5,
-            }]
+            labels: trend.map(d => fmtDate(d.week)),
+            datasets: [
+                {
+                    label: 'WSI',
+                    data: trend.map(d => d.wsi),
+                    borderColor: '#14b8a6',
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    tension: 0.2,
+                    pointRadius: trend.length === 1 ? 4 : 2,
+                    pointHoverRadius: 5,
+                    pointBackgroundColor: '#14b8a6',
+                    pointBorderColor: '#050810',
+                    pointBorderWidth: 1,
+                    borderWidth: 2,
+                    segment: {
+                        borderDash: ctx => trend[ctx.p1DataIndex]?.carried ? [4, 3] : [],
+                    },
+                },
+                {
+                    label: 'Raw Avg',
+                    data: trend.map(d => d.raw),
+                    borderColor: 'rgba(107,114,128,0.5)',
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    tension: 0.2,
+                    pointRadius: 0,
+                    pointHoverRadius: 3,
+                    borderWidth: 1,
+                    borderDash: [2, 2],
+                    segment: {
+                        borderDash: ctx => trend[ctx.p1DataIndex]?.carried ? [1, 3] : [2, 2],
+                    },
+                }
+            ]
         },
         options: {
             responsive: true,
             maintainAspectRatio: true,
             plugins: {
-                legend: { display: false },
-                tooltip: { ...ttCfg, callbacks: { afterLabel: ctx => `n=${data[ctx.dataIndex].count}` } }
+                legend: { display: true, labels: { boxWidth: 12, padding: 10, font: { family: "'JetBrains Mono', monospace", size: 9 }, color: '#6b7280' } },
+                tooltip: { ...ttCfg, callbacks: {
+                    afterLabel: ctx => {
+                        const d = trend[ctx.dataIndex];
+                        return d ? `articles: ${d.articles} | clusters: ${d.clusters}${d.carried ? ' (carried)' : ''}` : '';
+                    }
+                } }
             },
             scales: {
                 y: { min: 1, max: 5, grid: { color: 'rgba(26,31,46,0.5)' },
                      ticks: { stepSize: 1, font: { family: "'JetBrains Mono', monospace", size: 9 },
                               callback: v => ({ 1:'V.NEG', 2:'NEG', 3:'NEU', 4:'POS', 5:'V.POS' }[v] || v) } },
                 x: { grid: { color: 'rgba(26,31,46,0.3)' },
-                     ticks: { maxTicksLimit: 10, font: { family: "'JetBrains Mono', monospace", size: 9 } } }
+                     ticks: { maxTicksLimit: 12, font: { family: "'JetBrains Mono', monospace", size: 9 } } }
             }
         }
     });
 }
 
-function renderVoiceChart(voice) {
-    const canvas = document.getElementById('voiceChart');
-    const noData = document.getElementById('voiceNoData');
-    destroyChart('voice');
+function renderPeriodComparison(pc) {
+    const container = document.getElementById('periodComparison');
+    const noData = document.getElementById('periodNoData');
 
-    if (voice.elite.avg === null && voice.public.avg === null) {
+    if (!pc || (pc.current_4wk === null && pc.prior_4wk === null)) {
+        container.style.display = 'none';
+        noData.style.display = 'block';
+        return;
+    }
+    container.style.display = '';
+    noData.style.display = 'none';
+
+    const curEl = document.getElementById('periodCurrent');
+    const priorEl = document.getElementById('periodPrior');
+    const changeEl = document.getElementById('periodChange');
+
+    if (pc.current_4wk !== null) {
+        curEl.textContent = pc.current_4wk.toFixed(2);
+        curEl.style.color = sentimentColor(pc.current_4wk);
+    } else { curEl.textContent = '--'; }
+
+    if (pc.prior_4wk !== null) {
+        priorEl.textContent = pc.prior_4wk.toFixed(2);
+        priorEl.style.color = sentimentColor(pc.prior_4wk);
+    } else { priorEl.textContent = '--'; }
+
+    if (pc.change !== null) {
+        const arrow = pc.direction === 'improving' ? '\u25B2' : pc.direction === 'declining' ? '\u25BC' : '\u25C6';
+        const color = pc.direction === 'improving' ? 'var(--sent-5)' : pc.direction === 'declining' ? 'var(--sent-1)' : 'var(--sent-3)';
+        changeEl.textContent = `${arrow} ${pc.change > 0 ? '+' : ''}${pc.change.toFixed(2)} ${pc.direction}`;
+        changeEl.style.color = color;
+    } else { changeEl.textContent = '--'; }
+}
+
+// ══════════════════════════════════════════════
+//  PAGE 2: SENTIMENT
+// ══════════════════════════════════════════════
+let entitySortField = 'count';
+let entitySortAsc = false;
+let entityCache = [];
+
+async function renderSentiment() {
+    try {
+        const stateFilter = (document.getElementById('sentStateFilter') || {}).value || '';
+        const qs = stateFilter ? `?state=${stateFilter}` : '';
+
+        const [wsiData, topics, entities, articlesData, ...locResults] = await Promise.all([
+            fetchJSON(`/api/sentiment-index${qs}`),
+            fetchJSON(`/api/topics${qs}`),
+            fetchJSON(`/api/entities${qs}`),
+            fetchJSON(`/api/articles?limit=100${stateFilter ? '&state=' + stateFilter : ''}`),
+            ...Object.keys(STATE_CONFIG).map(s => fetchJSON(`/api/locations?state=${s}`)),
+        ]);
+
+        // A: WSI Trend Chart
+        renderSentimentWSIChart(wsiData.trend);
+
+        // B: Period Comparison Cards
+        renderPeriodCards();
+
+        // C: Location Heatmap (weekly)
+        const allLocations = {};
+        Object.keys(STATE_CONFIG).forEach((state, i) => {
+            Object.entries(locResults[i]).forEach(([loc, data]) => {
+                allLocations[`${STATE_ABBR[state] || state}:${loc}`] = data;
+            });
+        });
+        renderLocationHeatmap(wsiData.trend, allLocations);
+
+        // D: Topic Sentiment Bars
+        renderTopicBars(topics);
+
+        // E: Entity Tracker
+        renderEntityTable(entities.entities);
+
+        // F: Key Articles
+        renderKeyArticles(articlesData.articles);
+
+        // G: Distribution
+        renderDistribution(articlesData.articles);
+
+    } catch (err) { console.error('Sentiment error:', err); }
+}
+
+function renderSentimentWSIChart(trend) {
+    const canvas = document.getElementById('sentTrendChart');
+    const noData = document.getElementById('sentTrendNoData');
+    destroyChart('sentTrend');
+
+    const realData = trend ? trend.filter(t => t.wsi !== null) : [];
+    if (realData.length === 0) {
         canvas.style.display = 'none';
         noData.style.display = 'block';
         return;
@@ -547,58 +661,86 @@ function renderVoiceChart(voice) {
     canvas.style.display = 'block';
     noData.style.display = 'none';
 
-    charts.voice = new Chart(canvas, {
-        type: 'bar',
+    charts.sentTrend = new Chart(canvas, {
+        type: 'line',
         data: {
-            labels: ['Elite', 'Public'],
-            datasets: [{
-                data: [voice.elite.avg || 0, voice.public.avg || 0],
-                backgroundColor: [
-                    voice.elite.avg ? sentimentColor(voice.elite.avg) : '#1a1f2e',
-                    voice.public.avg ? sentimentColor(voice.public.avg) : '#1a1f2e',
-                ],
-                borderRadius: 0,
-                barThickness: 18,
-            }]
+            labels: trend.map(d => fmtDate(d.week)),
+            datasets: [
+                {
+                    label: 'WSI',
+                    data: trend.map(d => d.wsi),
+                    borderColor: '#14b8a6',
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    tension: 0.2,
+                    pointRadius: 3,
+                    pointHoverRadius: 6,
+                    pointBackgroundColor: '#14b8a6',
+                    pointBorderColor: '#050810',
+                    pointBorderWidth: 1,
+                    borderWidth: 2.5,
+                    segment: { borderDash: ctx => trend[ctx.p1DataIndex]?.carried ? [4, 3] : [] },
+                },
+                {
+                    label: 'Raw Avg',
+                    data: trend.map(d => d.raw),
+                    borderColor: 'rgba(107,114,128,0.5)',
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    tension: 0.2,
+                    pointRadius: 0,
+                    pointHoverRadius: 3,
+                    borderWidth: 1,
+                    borderDash: [2, 2],
+                    segment: { borderDash: ctx => trend[ctx.p1DataIndex]?.carried ? [1, 3] : [2, 2] },
+                }
+            ]
         },
         options: {
-            indexAxis: 'y',
             responsive: true,
             maintainAspectRatio: true,
-            plugins: { legend: { display: false }, tooltip: { ...ttCfg,
-                callbacks: { afterLabel: ctx => `n=${ctx.dataIndex === 0 ? voice.elite.count : voice.public.count}` } } },
+            plugins: {
+                legend: { display: true, labels: { boxWidth: 12, padding: 10, font: { family: "'JetBrains Mono', monospace", size: 9 }, color: '#6b7280' } },
+                tooltip: { ...ttCfg, callbacks: {
+                    afterLabel: ctx => {
+                        const d = trend[ctx.dataIndex];
+                        return d ? `articles: ${d.articles} | clusters: ${d.clusters}${d.carried ? ' (carried)' : ''}` : '';
+                    }
+                } }
+            },
             scales: {
-                x: { min: 0, max: 5, grid: { color: 'rgba(26,31,46,0.5)' },
-                     ticks: { font: { family: "'JetBrains Mono', monospace", size: 9 } } },
-                y: { grid: { display: false },
-                     ticks: { font: { family: "'JetBrains Mono', monospace", size: 10 } } }
+                y: { min: 1, max: 5, grid: { color: 'rgba(26,31,46,0.5)' },
+                     ticks: { stepSize: 1, font: { family: "'JetBrains Mono', monospace", size: 9 },
+                              callback: v => ({ 1:'V.NEG', 2:'NEG', 3:'NEU', 4:'POS', 5:'V.POS' }[v] || v) } },
+                x: { grid: { color: 'rgba(26,31,46,0.3)' },
+                     ticks: { maxTicksLimit: 14, font: { family: "'JetBrains Mono', monospace", size: 9 } } }
             }
         }
     });
 }
 
-// ══════════════════════════════════════════════
-//  PAGE 2: SENTIMENT
-// ══════════════════════════════════════════════
-async function renderSentiment() {
+async function renderPeriodCards() {
+    const container = document.getElementById('periodCards');
+    const states = ['', 'wyoming', 'texas', 'michigan'];
+    const labels = ['All States', 'Wyoming', 'Texas', 'Michigan'];
+
     try {
-        const stateKeys = Object.keys(STATE_CONFIG);
-        const [trend, topics, ...locResults] = await Promise.all([
-            fetchJSON('/api/sentiment-trend'),
-            fetchJSON('/api/topics'),
-            ...stateKeys.map(s => fetchJSON(`/api/locations?state=${s}`)),
-        ]);
-        // Merge all locations with state prefix
-        const allLocations = {};
-        stateKeys.forEach((state, i) => {
-            Object.entries(locResults[i]).forEach(([loc, data]) => {
-                allLocations[`${STATE_ABBR[state] || state}:${loc}`] = data;
-            });
-        });
-        renderLocationHeatmap(trend.data, allLocations);
-        renderTopicHeatmap(trend.data, topics);
-        renderDistribution();
-    } catch (err) { console.error('Sentiment error:', err); }
+        const results = await Promise.all(
+            states.map(s => fetchJSON(`/api/sentiment-index${s ? '?state=' + s : ''}`))
+        );
+
+        container.innerHTML = results.map((r, i) => {
+            const pc = r.period_comparison;
+            const wsi = r.current_wsi;
+            const arrow = pc?.direction === 'improving' ? '\u25B2' : pc?.direction === 'declining' ? '\u25BC' : '\u25C6';
+            const changeColor = pc?.direction === 'improving' ? 'var(--sent-5)' : pc?.direction === 'declining' ? 'var(--sent-1)' : 'var(--sent-3)';
+            return `<div class="period-card" style="border-left: 3px solid ${sentimentColor(wsi)}">
+                <div class="period-card-label">${labels[i]}</div>
+                <div class="period-card-wsi" style="color:${sentimentColor(wsi)}">${wsi !== null ? wsi.toFixed(2) : '--'}</div>
+                <div class="period-card-change" style="color:${changeColor}">${pc?.change !== null ? `${arrow} ${pc.change > 0 ? '+' : ''}${pc.change.toFixed(2)}` : '--'}</div>
+            </div>`;
+        }).join('');
+    } catch (err) { console.error('Period cards error:', err); }
 }
 
 function renderLocationHeatmap(trendData, locations) {
@@ -608,25 +750,28 @@ function renderLocationHeatmap(trendData, locations) {
     noData.style.display = 'none';
 
     const locs = Object.keys(locations);
-    const dates = trendData.map(d => d.date);
-    el.style.gridTemplateColumns = `120px repeat(${dates.length}, 34px)`;
+    // Use weekly data — show last 12 weeks for readability
+    const weeks = trendData.filter(t => t.wsi !== null).slice(-12);
+    if (weeks.length === 0) { el.innerHTML = ''; noData.style.display = 'block'; return; }
+
+    el.style.gridTemplateColumns = `120px repeat(${weeks.length}, 34px)`;
 
     let html = '<div class="hm-label"></div>';
-    dates.forEach(d => { html += `<div class="hm-header">${fmtDate(d)}</div>`; });
+    weeks.forEach(w => { html += `<div class="hm-header">${fmtDate(w.week)}</div>`; });
 
     locs.forEach(loc => {
         const [stateAbbr, locName] = loc.split(':');
         const displayName = `${stateAbbr} ${locName.replace(/_/g, ' ')}`;
         const shortName = displayName.length > 16 ? displayName.substring(0, 14) + '..' : displayName;
         html += `<div class="hm-label" title="${displayName}">${shortName}</div>`;
-        dates.forEach((d, i) => {
+        weeks.forEach(w => {
             const locAvg = locations[loc]?.avg;
-            const dayAvg = trendData[i].avg_sentiment;
-            const val = locAvg !== null && locAvg !== undefined ? (dayAvg * 0.5 + locAvg * 0.5) : null;
+            const weekWsi = w.wsi;
+            const val = locAvg !== null && locAvg !== undefined && weekWsi !== null ? (weekWsi * 0.5 + locAvg * 0.5) : null;
             if (val !== null) {
-                html += `<div class="hm-cell" style="background:${sentimentColor(val)};opacity:0.8" data-tip="${displayName} | ${fmtDate(d)} | ${val.toFixed(1)}"></div>`;
+                html += `<div class="hm-cell" style="background:${sentimentColor(val)};opacity:0.8" data-tip="${displayName} | ${fmtDate(w.week)} | ${val.toFixed(1)}"></div>`;
             } else {
-                html += `<div class="hm-cell empty" data-tip="${displayName} | ${fmtDate(d)} | --"></div>`;
+                html += `<div class="hm-cell empty" data-tip="${displayName} | ${fmtDate(w.week)} | --"></div>`;
             }
         });
     });
@@ -634,35 +779,117 @@ function renderLocationHeatmap(trendData, locations) {
     attachHmTooltips(el);
 }
 
-function renderTopicHeatmap(trendData, topicData) {
-    const el = document.getElementById('topicHeatmap');
-    const noData = document.getElementById('topicHeatNoData');
-    if (!topicData.topics || topicData.topics.length === 0 || !trendData || trendData.length === 0) {
-        el.innerHTML = ''; noData.style.display = 'block'; return;
+function renderTopicBars(topicData) {
+    const canvas = document.getElementById('topicBarChart');
+    const noData = document.getElementById('topicBarNoData');
+    destroyChart('topicBar');
+
+    if (!topicData.topics || topicData.topics.length === 0) {
+        canvas.style.display = 'none';
+        noData.style.display = 'block';
+        return;
+    }
+    canvas.style.display = 'block';
+    noData.style.display = 'none';
+
+    // Sort by deviation from neutral (3.0) — most polarizing first
+    const sorted = [...topicData.topics]
+        .filter(t => t.avg_sentiment !== null)
+        .sort((a, b) => Math.abs(b.avg_sentiment - 3.0) - Math.abs(a.avg_sentiment - 3.0));
+
+    charts.topicBar = new Chart(canvas, {
+        type: 'bar',
+        data: {
+            labels: sorted.map(t => `${topicDisplay(t.name)} (n=${t.count})`),
+            datasets: [{
+                data: sorted.map(t => t.avg_sentiment),
+                backgroundColor: sorted.map(t => sentimentColor(t.avg_sentiment)),
+                borderRadius: 0,
+                barThickness: 18,
+            }]
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false }, tooltip: ttCfg },
+            scales: {
+                x: { min: 1, max: 5, grid: { color: 'rgba(26,31,46,0.5)' },
+                     ticks: { stepSize: 1, font: { family: "'JetBrains Mono', monospace", size: 9 },
+                              callback: v => ({ 1:'V.NEG', 2:'NEG', 3:'NEU', 4:'POS', 5:'V.POS' }[v] || v) } },
+                y: { grid: { display: false },
+                     ticks: { font: { family: "'JetBrains Mono', monospace", size: 9 } } }
+            }
+        }
+    });
+    // Dynamic height based on number of topics
+    canvas.style.height = Math.max(150, sorted.length * 28) + 'px';
+}
+
+function renderEntityTable(entities) {
+    entityCache = entities || [];
+    const tbody = document.getElementById('entityBody');
+    const noData = document.getElementById('entityNoData');
+
+    if (!entityCache.length) {
+        tbody.innerHTML = '';
+        noData.style.display = 'block';
+        return;
+    }
+    noData.style.display = 'none';
+    _renderEntityRows();
+}
+
+function sortEntityTable(field) {
+    if (entitySortField === field) entitySortAsc = !entitySortAsc;
+    else { entitySortField = field; entitySortAsc = field === 'name'; }
+    _renderEntityRows();
+}
+
+function _renderEntityRows() {
+    const sorted = [...entityCache].sort((a, b) => {
+        let va = a[entitySortField], vb = b[entitySortField];
+        if (va === null || va === undefined) va = entitySortAsc ? Infinity : -Infinity;
+        if (vb === null || vb === undefined) vb = entitySortAsc ? Infinity : -Infinity;
+        if (typeof va === 'string') return entitySortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+        return entitySortAsc ? va - vb : vb - va;
+    });
+
+    const tbody = document.getElementById('entityBody');
+    tbody.innerHTML = sorted.slice(0, 20).map(e => `<tr>
+        <td class="text-cell">${escapeHtml(e.name)}</td>
+        <td>${e.count}</td>
+        <td><span style="color:${sentimentColor(e.avg_sentiment)}">${e.avg_sentiment !== null ? e.avg_sentiment.toFixed(2) : '--'}</span></td>
+    </tr>`).join('');
+}
+
+function renderKeyArticles(articles) {
+    const container = document.getElementById('keyArticlesList');
+    const noData = document.getElementById('keyArticlesNoData');
+
+    if (!articles || articles.length === 0) {
+        container.innerHTML = '';
+        noData.style.display = 'block';
+        return;
     }
     noData.style.display = 'none';
 
-    const topics = topicData.topics.slice(0, 8);
-    const dates = trendData.map(d => d.date);
-    el.style.gridTemplateColumns = `90px repeat(${dates.length}, 34px)`;
+    // Sort by deviation from neutral — most polarizing first
+    const sorted = [...articles]
+        .filter(a => a.sentiment_score !== null)
+        .sort((a, b) => Math.abs(b.sentiment_score - 3.0) - Math.abs(a.sentiment_score - 3.0))
+        .slice(0, 8);
 
-    let html = '<div class="hm-label"></div>';
-    dates.forEach(d => { html += `<div class="hm-header">${fmtDate(d)}</div>`; });
-
-    topics.forEach(t => {
-        const name = topicDisplay(t.name);
-        const short = name.length > 12 ? name.substring(0, 10) + '..' : name;
-        html += `<div class="hm-label" title="${name}">${short}</div>`;
-        dates.forEach((d, i) => {
-            if (t.avg_sentiment !== null) {
-                html += `<div class="hm-cell" style="background:${sentimentColor(t.avg_sentiment)};opacity:0.8" data-tip="${name} | ${fmtDate(d)} | ${t.avg_sentiment.toFixed(1)} (n=${t.count})"></div>`;
-            } else {
-                html += `<div class="hm-cell empty" data-tip="${name} | ${fmtDate(d)} | --"></div>`;
-            }
-        });
-    });
-    el.innerHTML = html;
-    attachHmTooltips(el);
+    container.innerHTML = sorted.map(a => `<div class="key-article">
+        <div class="key-article-header">
+            <span class="pill ${sentimentPillClass(a.sentiment_label)}">${sentimentLabel(a.sentiment_label)}</span>
+            <span class="key-article-score" style="color:${sentimentColor(a.sentiment_score)}">${a.sentiment_score.toFixed(1)}</span>
+            <span class="key-article-meta">${escapeHtml(a.source || '')} &mdash; ${fmtDate(a.published_date)}</span>
+            <span class="pill pill-state">${STATE_ABBR[a.state] || ''}</span>
+        </div>
+        <div class="key-article-title">${a.url ? `<a href="${a.url}" target="_blank" rel="noopener">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}</div>
+        ${a.key_claims ? `<div class="key-article-claims">${escapeHtml(a.key_claims)}</div>` : ''}
+    </div>`).join('');
 }
 
 function attachHmTooltips(container) {
@@ -674,15 +901,15 @@ function attachHmTooltips(container) {
     });
 }
 
-async function renderDistribution() {
+async function renderDistribution(articles) {
     const canvas = document.getElementById('distributionChart');
     const noData = document.getElementById('distNoData');
     destroyChart('dist');
 
     try {
-        const data = await fetchJSON('/api/articles?limit=1000');
+        const data = articles || (await fetchJSON('/api/articles?limit=1000')).articles;
         const counts = { strongly_positive: 0, slightly_positive: 0, neutral: 0, slightly_negative: 0, strongly_negative: 0 };
-        data.articles.forEach(a => { if (a.sentiment_label && counts.hasOwnProperty(a.sentiment_label)) counts[a.sentiment_label]++; });
+        data.forEach(a => { if (a.sentiment_label && counts.hasOwnProperty(a.sentiment_label)) counts[a.sentiment_label]++; });
 
         const total = Object.values(counts).reduce((a, b) => a + b, 0);
         if (total === 0) { canvas.style.display = 'none'; noData.style.display = 'block'; return; }
@@ -692,7 +919,7 @@ async function renderDistribution() {
         charts.dist = new Chart(canvas, {
             type: 'doughnut',
             data: {
-                labels: ['V.POS', 'POS', 'NEU', 'NEG', 'V.NEG'],
+                labels: [`V.POS ${counts.strongly_positive}`, `POS ${counts.slightly_positive}`, `NEU ${counts.neutral}`, `NEG ${counts.slightly_negative}`, `V.NEG ${counts.strongly_negative}`],
                 datasets: [{
                     data: [counts.strongly_positive, counts.slightly_positive, counts.neutral, counts.slightly_negative, counts.strongly_negative],
                     backgroundColor: ['#22c55e', '#84cc16', '#eab308', '#f97316', '#ef4444'],
@@ -705,7 +932,7 @@ async function renderDistribution() {
                 maintainAspectRatio: true,
                 cutout: '75%',
                 plugins: {
-                    legend: { position: 'bottom', labels: { boxWidth: 8, padding: 12, font: { family: "'JetBrains Mono', monospace", size: 9 }, color: '#6b7280' } },
+                    legend: { position: 'bottom', labels: { boxWidth: 8, padding: 8, font: { family: "'JetBrains Mono', monospace", size: 9 }, color: '#6b7280', usePointStyle: false } },
                     tooltip: ttCfg,
                 }
             }
@@ -787,10 +1014,9 @@ async function renderArticles(append = false) {
                     <td><span class="pill ${sentimentPillClass(a.sentiment_label)}">${sentimentLabel(a.sentiment_label)}</span></td>
                     <td><span class="pill pill-state">${STATE_ABBR[a.state] || (a.state ? a.state.toUpperCase() : '--')}</span></td>
                     <td><span class="pill pill-loc">${capitalize(a.location_relevance || '')}</span></td>
-                    <td><span class="pill pill-${a.voice_type}">${(a.voice_type || '').toUpperCase()}</span></td>
                 </tr>
                 <tr class="expand-row hidden" id="expand-${idx}">
-                    <td colspan="7">
+                    <td colspan="6">
                         <div class="article-detail" data-article-id="${a.id}">
                             ${a.url ? `<a href="${a.url}" target="_blank" rel="noopener" class="article-detail-url">${escapeHtml(a.url)}</a>` : ''}
                             <div class="article-detail-grid">
@@ -824,15 +1050,6 @@ async function renderArticles(append = false) {
                                     <div class="article-detail-field">
                                         <select class="detail-select detail-region-select" data-field="location_relevance" onchange="markArticleDirty(this)">
                                             ${regionOptions(a.state, a.location_relevance)}
-                                        </select>
-                                    </div>
-                                </div>
-                                <div class="article-detail-section">
-                                    <div class="article-detail-label">VOICE</div>
-                                    <div class="article-detail-field">
-                                        <select class="detail-select" data-field="voice_type" onchange="markArticleDirty(this)">
-                                            <option value="elite" ${a.voice_type==='elite'?'selected':''}>Elite</option>
-                                            <option value="public" ${a.voice_type==='public'?'selected':''}>Public</option>
                                         </select>
                                     </div>
                                 </div>
@@ -939,7 +1156,6 @@ async function saveArticle(btn, articleId) {
                 cells[3].innerHTML = `<span class="pill ${sentimentPillClass(payload.sentiment_label)}">${sentimentLabel(payload.sentiment_label)}</span>`;
                 cells[4].innerHTML = `<span class="pill pill-state">${STATE_ABBR[payload.state] || (payload.state || '--').toUpperCase()}</span>`;
                 cells[5].innerHTML = `<span class="pill pill-loc">${capitalize(payload.location_relevance || '')}</span>`;
-                cells[6].innerHTML = `<span class="pill pill-${payload.voice_type}">${(payload.voice_type || '').toUpperCase()}</span>`;
             }
         } else {
             const err = await resp.json();
@@ -1039,137 +1255,84 @@ function exportReport() { window.location.href = '/api/export'; }
 // ══════════════════════════════════════════════
 let _pollTimers = {};
 
-let _currentBatchId = null;
+async function renderReviewQueue() {
+    const table = document.getElementById('queueTable');
+    const tbody = document.getElementById('queueBody');
+    const empty = document.getElementById('queueEmpty');
+    const actions = document.getElementById('queueActions');
+    const statsEl = document.getElementById('queueStats');
 
-async function renderPendingQueue() {
-    const list = document.getElementById('pendingQueueList');
-    const empty = document.getElementById('pendingQueueEmpty');
-    const panel = document.getElementById('batchReviewPanel');
     try {
-        const data = await fetchJSON('/api/control/pending-batches');
-        const batches = data.batches || [];
+        const data = await fetchJSON('/api/control/pending');
+        const articles = data.articles || [];
+        const stats = data.stats || {};
 
-        // Clear existing batch rows (keep the empty message and review panel)
-        Array.from(list.children).forEach(el => {
-            if (el.id !== 'pendingQueueEmpty' && el.id !== 'batchReviewPanel') el.remove();
-        });
+        // Stats summary
+        const statParts = [];
+        if (stats.rss) statParts.push(`${stats.rss} RSS`);
+        if (stats.websearch) statParts.push(`${stats.websearch} Web`);
+        if (stats.manual) statParts.push(`${stats.manual} Manual`);
+        statsEl.textContent = statParts.length ? `(${statParts.join(' \u00B7 ')})` : '';
 
-        if (batches.length === 0) {
+        if (articles.length === 0) {
+            table.style.display = 'none';
+            actions.style.display = 'none';
             empty.style.display = 'block';
-            panel.style.display = 'none';
-            _currentBatchId = null;
             return;
         }
+        table.style.display = '';
+        actions.style.display = '';
         empty.style.display = 'none';
 
-        batches.forEach(b => {
-            const scoreText = b.avg_relevance !== null ? `avg score ${b.avg_relevance}` : 'unscored';
-            const date = b.created_date ? fmtDateTime(b.created_date) : '--';
-            const isActive = _currentBatchId === b.search_id;
-            const row = document.createElement('div');
-            row.className = 'batch-row' + (isActive ? ' batch-row-active' : '');
-            row.id = `batch-row-${b.search_id}`;
-            row.innerHTML = `
-                <div class="batch-meta">
-                    <span class="batch-id">${b.search_id}</span>
-                    <span class="batch-date">${date}</span>
-                    <span class="batch-count">${b.count} article${b.count !== 1 ? 's' : ''}</span>
-                    <span class="batch-score">${scoreText}</span>
-                </div>
-                <div class="batch-actions">
-                    <button class="btn-batch-review" onclick="openBatchReview('${b.search_id}', ${b.count})">
-                        ${isActive ? 'Hide' : 'Review'}
-                    </button>
-                    <button class="btn-batch-discard" onclick="discardBatch('${b.search_id}', this)">Discard</button>
-                </div>
-            `;
-            list.insertBefore(row, empty);
-        });
+        document.getElementById('queueTotal').textContent = articles.length;
+        document.getElementById('queueSelectAll').checked = false;
 
-        // Re-open active batch if still present
-        if (_currentBatchId && batches.find(b => b.search_id === _currentBatchId)) {
-            await loadBatchArticles(_currentBatchId);
-        } else {
-            panel.style.display = 'none';
-            _currentBatchId = null;
-        }
-    } catch (err) { console.error('Pending queue error:', err); }
-}
-
-async function openBatchReview(searchId, count) {
-    const panel = document.getElementById('batchReviewPanel');
-    if (_currentBatchId === searchId && panel.style.display !== 'none') {
-        panel.style.display = 'none';
-        _currentBatchId = null;
-        renderPendingQueue();
-        return;
-    }
-    _currentBatchId = searchId;
-    document.getElementById('batchReviewId').textContent = searchId;
-    document.getElementById('batchReviewCount').textContent = count;
-    document.getElementById('batchReviewStatus').innerHTML = '';
-    await loadBatchArticles(searchId);
-    renderPendingQueue();
-}
-
-async function loadBatchArticles(searchId) {
-    const panel = document.getElementById('batchReviewPanel');
-    const tbody = document.getElementById('batchReviewBody');
-    try {
-        const data = await fetchJSON(`/api/control/pending?search_id=${searchId}`);
-        if (!data.articles || data.articles.length === 0) {
-            panel.style.display = 'none';
-            return;
-        }
-        panel.style.display = 'block';
-        // Position panel after the batch row
-        const batchRow = document.getElementById(`batch-row-${searchId}`);
-        if (batchRow) batchRow.after(panel);
-
-        document.getElementById('batchSelectAll').checked = true;
-        tbody.innerHTML = data.articles.map(a => {
+        tbody.innerHTML = articles.map(a => {
             const hasScore = a.relevance_score !== null && a.relevance_score !== undefined;
             const scoreCls = !hasScore ? 'rel-none' : a.relevance_score >= 8 ? 'rel-high' : a.relevance_score >= 5 ? 'rel-mid' : 'rel-low';
-            const scoreText = hasScore ? a.relevance_score : '—';
-            const titleTrunc = a.title && a.title.length > 60 ? a.title.substring(0, 57) + '...' : (a.title || '--');
-            const reason = a.relevance_reason || (hasScore ? '' : 'Not scored');
-            const reasonTrunc = reason.length > 50 ? reason.substring(0, 47) + '...' : reason;
+            const scoreText = hasScore ? a.relevance_score : '\u2014';
+            const titleTrunc = a.title && a.title.length > 55 ? a.title.substring(0, 52) + '...' : (a.title || '--');
+            const stateAbbr = STATE_ABBR[a.state] || (a.state || '').toUpperCase().substring(0, 2);
+            const typeCls = a.source_type === 'rss' ? 'pill-rss' : 'pill-web';
+            const typeLabel = a.source_type === 'rss' ? 'RSS' : 'WEB';
+            const preChecked = hasScore && a.relevance_score >= 7;
+            const reason = a.relevance_reason || '';
             const summary = a.summary ? escapeHtml(a.summary) : '<span style="color:var(--text-muted)">No summary</span>';
             return `<tr style="cursor:pointer" onclick="togglePendingExpand(${a.id}, event)">
-                <td><input type="checkbox" class="batch-check" data-id="${a.id}" checked onchange="updateBatchSelectedCount()"></td>
+                <td><input type="checkbox" class="queue-check" data-id="${a.id}" ${preChecked ? 'checked' : ''} onchange="updateQueueSelectedCount()" onclick="event.stopPropagation()"></td>
                 <td><span class="relevance-score ${scoreCls}">${scoreText}</span></td>
-                <td class="text-cell" title="${escapeHtml(a.title)}"><a href="${escapeHtml(a.url || '#')}" target="_blank" rel="noopener" class="article-link">${escapeHtml(titleTrunc)}</a></td>
+                <td class="text-cell" title="${escapeHtml(a.title)}"><a href="${escapeHtml(a.url || '#')}" target="_blank" rel="noopener" class="article-link" onclick="event.stopPropagation()">${escapeHtml(titleTrunc)}</a></td>
                 <td>${escapeHtml(a.source || '')}</td>
+                <td>${stateAbbr ? `<span class="pill pill-state">${stateAbbr}</span>` : '--'}</td>
                 <td>${fmtDate(a.published_date)}</td>
-                <td class="text-cell" title="${escapeHtml(reason)}">${escapeHtml(reasonTrunc)}</td>
+                <td><span class="pill ${typeCls}">${typeLabel}</span></td>
             </tr>
             <tr class="expand-row hidden" id="pending-expand-${a.id}">
-                <td colspan="6" class="pending-detail">
-                    <div class="pending-detail-reason"><strong>Relevance:</strong> ${escapeHtml(reason)}</div>
+                <td colspan="7" class="pending-detail">
+                    ${reason ? `<div class="pending-detail-reason"><strong>Relevance:</strong> ${escapeHtml(reason)}</div>` : ''}
                     <div class="pending-detail-summary">${summary}</div>
                     ${a.url ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" class="article-link" style="font-size:10px;word-break:break-all">${escapeHtml(a.url)}</a>` : ''}
                 </td>
             </tr>`;
         }).join('');
-        updateBatchSelectedCount();
-    } catch (err) { console.error('Load batch error:', err); }
+        updateQueueSelectedCount();
+    } catch (err) { console.error('Review queue error:', err); }
 }
 
-function toggleAllBatch(checked) {
-    document.querySelectorAll('.batch-check').forEach(cb => { cb.checked = checked; });
-    updateBatchSelectedCount();
+function toggleAllQueue(checked) {
+    document.querySelectorAll('.queue-check').forEach(cb => { cb.checked = checked; });
+    updateQueueSelectedCount();
 }
 
-function updateBatchSelectedCount() {
-    const checked = document.querySelectorAll('.batch-check:checked').length;
-    document.getElementById('batchReviewSelected').textContent = checked;
+function updateQueueSelectedCount() {
+    const checked = document.querySelectorAll('.queue-check:checked').length;
+    document.getElementById('queueSelected').textContent = checked;
 }
 
-async function approveBatchSelected() {
-    const ids = Array.from(document.querySelectorAll('.batch-check:checked')).map(cb => parseInt(cb.dataset.id));
-    const unchecked = Array.from(document.querySelectorAll('.batch-check:not(:checked)')).map(cb => parseInt(cb.dataset.id));
+async function approveQueueSelected() {
+    const ids = Array.from(document.querySelectorAll('.queue-check:checked')).map(cb => parseInt(cb.dataset.id));
     if (ids.length === 0) return;
-    const status = document.getElementById('batchReviewStatus');
+    const status = document.getElementById('queueStatus');
     try {
         const resp = await fetch('/api/control/approve', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1177,54 +1340,79 @@ async function approveBatchSelected() {
         });
         const data = await resp.json();
         if (data.success) {
-            if (unchecked.length > 0) {
-                await fetch('/api/control/reject', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ article_ids: unchecked }),
-                });
-            }
             status.innerHTML = `<span class="task-complete">Approved ${data.approved} article${data.approved !== 1 ? 's' : ''}</span>`;
-            _currentBatchId = null;
-            await renderPendingQueue();
+            await renderReviewQueue();
         }
-    } catch (err) { console.error('Approve batch error:', err); }
+    } catch (err) { console.error('Approve error:', err); }
 }
 
-async function rejectBatchUnselected() {
-    const ids = Array.from(document.querySelectorAll('.batch-check:not(:checked)')).map(cb => parseInt(cb.dataset.id));
+async function rejectQueueUnselected() {
+    const ids = Array.from(document.querySelectorAll('.queue-check:not(:checked)')).map(cb => parseInt(cb.dataset.id));
     if (ids.length === 0) return;
-    const status = document.getElementById('batchReviewStatus');
+    const status = document.getElementById('queueStatus');
     try {
         await fetch('/api/control/reject', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ article_ids: ids }),
         });
         status.innerHTML = `<span class="task-complete">Rejected ${ids.length} article${ids.length !== 1 ? 's' : ''}</span>`;
-        _currentBatchId = null;
-        await renderPendingQueue();
-    } catch (err) { console.error('Reject batch error:', err); }
+        await renderReviewQueue();
+    } catch (err) { console.error('Reject error:', err); }
 }
 
-async function discardCurrentBatch() {
-    if (!_currentBatchId) return;
-    await discardBatch(_currentBatchId, null);
-}
-
-async function discardBatch(searchId, btn) {
-    if (btn) { btn.disabled = true; btn.textContent = '...'; }
-    const status = document.getElementById('batchReviewStatus');
+async function approveAboveThreshold() {
+    const status = document.getElementById('queueStatus');
     try {
-        const resp = await fetch('/api/control/discard-batch', {
+        const resp = await fetch('/api/control/approve-above', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ search_id: searchId }),
+            body: JSON.stringify({ threshold: 7 }),
         });
         const data = await resp.json();
         if (data.success) {
-            if (status) status.innerHTML = `<span class="task-complete">Discarded ${data.discarded} article${data.discarded !== 1 ? 's' : ''}</span>`;
-            if (_currentBatchId === searchId) _currentBatchId = null;
-            await renderPendingQueue();
+            status.innerHTML = `<span class="task-complete">Approved ${data.approved} article${data.approved !== 1 ? 's' : ''} with score &ge; 7</span>`;
+            await renderReviewQueue();
         }
-    } catch (err) { console.error('Discard error:', err); }
+    } catch (err) { console.error('Approve-above error:', err); }
+}
+
+async function clearRejected() {
+    try {
+        await fetch('/api/control/clear-pending', { method: 'POST' });
+        document.getElementById('queueStatus').innerHTML = '<span class="task-complete">Cleared rejected articles</span>';
+    } catch (err) { console.error('Clear error:', err); }
+}
+
+async function renderAnalysisQueue() {
+    const table = document.getElementById('analysisTable');
+    const tbody = document.getElementById('analysisBody');
+    const empty = document.getElementById('analysisEmpty');
+    const countEl = document.getElementById('analysisCount');
+
+    try {
+        const data = await fetchJSON('/api/control/unanalyzed');
+        const articles = data.articles || [];
+
+        countEl.textContent = articles.length > 0 ? `(${articles.length})` : '';
+
+        if (articles.length === 0) {
+            table.style.display = 'none';
+            empty.style.display = 'block';
+            return;
+        }
+        table.style.display = '';
+        empty.style.display = 'none';
+
+        tbody.innerHTML = articles.map(a => {
+            const titleTrunc = a.title && a.title.length > 65 ? a.title.substring(0, 62) + '...' : (a.title || '--');
+            const stateAbbr = STATE_ABBR[a.state] || (a.state || '').toUpperCase().substring(0, 2);
+            return `<tr>
+                <td class="text-cell">${a.url ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" class="article-link">${escapeHtml(titleTrunc)}</a>` : escapeHtml(titleTrunc)}</td>
+                <td>${escapeHtml(a.source || '')}</td>
+                <td>${fmtDate(a.published_date)}</td>
+                <td>${stateAbbr ? `<span class="pill pill-state">${stateAbbr}</span>` : '--'}</td>
+            </tr>`;
+        }).join('');
+    } catch (err) { console.error('Analysis queue error:', err); }
 }
 
 async function renderControl() {
@@ -1234,7 +1422,8 @@ async function renderControl() {
         dateEl.value = new Date().toISOString().split('T')[0];
     }
 
-    await renderPendingQueue();
+    await renderReviewQueue();
+    await renderAnalysisQueue();
 
     // Load recent tasks
     try {
@@ -1347,7 +1536,7 @@ const TASK_ENDPOINTS = {
 
 const TASK_BTN_MAP = {
     ingest: 'btnIngest',
-    analysis: 'btnAnalysis',
+    analysis: 'btnRunAnalysis',
     digest: 'btnDigest',
 };
 
@@ -1420,26 +1609,25 @@ function pollTask(taskId, type, btnId, statusId) {
 }
 
 // ══════════════════════════════════════════════
-//  WEB SEARCH + REVIEW PIPELINE
+//  WEB SEARCH
 // ══════════════════════════════════════════════
-let _currentSearchId = null;
 
 async function runWebSearch() {
     const btn = document.getElementById('btnWebsearch');
     const status = document.getElementById('statusWebsearch');
     const query = document.getElementById('ctrlSearchQuery').value.trim();
     const daysBack = document.getElementById('ctrlSearchDays').value;
+    const state = (document.getElementById('ctrlSearchState') || {}).value || '';
 
     btn.disabled = true;
     btn.classList.add('running');
     status.innerHTML = '<span class="task-running">Searching...</span>';
-    document.getElementById('reviewSection').style.display = 'none';
 
     try {
         const resp = await fetch('/api/control/run-websearch', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: query || null, days_back: parseInt(daysBack) }),
+            body: JSON.stringify({ query: query || null, days_back: parseInt(daysBack), state: state || null }),
         });
         const data = await resp.json();
 
@@ -1479,18 +1667,15 @@ function pollWebSearch(taskId) {
 
                 const r = data.result || {};
                 let msg = `Found ${r.total_results || 0} results | ${r.new_articles || 0} new`;
+                if (r.auto_approved > 0) msg += ` | ${r.auto_approved} auto-approved`;
                 if (r.skipped_url > 0 || r.skipped_title > 0) {
-                    msg += ` | ${(r.skipped_url || 0) + (r.skipped_title || 0)} duplicates filtered`;
+                    msg += ` | ${(r.skipped_url || 0) + (r.skipped_title || 0)} dupes filtered`;
                 }
                 if (r.api_key_set === false && r.new_articles > 0) {
-                    msg += `</span><br><span class="task-warning">ANTHROPIC_API_KEY not set — relevance scoring skipped. Set the key and restart to enable.`;
+                    msg += `</span><br><span class="task-warning">API key not set — relevance scoring skipped`;
                 }
                 status.innerHTML = `<span class="task-complete">${msg}</span>`;
-
-                _currentSearchId = r.search_id;
-                if (r.new_articles > 0) {
-                    loadPendingArticles(r.search_id);
-                }
+                renderReviewQueue(); // Refresh the unified queue
                 renderControl(); // Refresh task list
             } else if (data.status === 'error') {
                 clearInterval(_pollTimers.websearch);
@@ -1509,134 +1694,10 @@ function pollWebSearch(taskId) {
     }, 2000);
 }
 
-async function loadPendingArticles(searchId) {
-    const section = document.getElementById('reviewSection');
-    const tbody = document.getElementById('reviewBody');
-
-    try {
-        let url = '/api/control/pending';
-        if (searchId) url += `?search_id=${searchId}`;
-        const data = await fetchJSON(url);
-
-        if (!data.articles || data.articles.length === 0) {
-            section.style.display = 'none';
-            return;
-        }
-
-        section.style.display = 'block';
-        document.getElementById('reviewCount').textContent = data.articles.length;
-        document.getElementById('selectAll').checked = true;
-
-        tbody.innerHTML = data.articles.map(a => {
-            const hasScore = a.relevance_score !== null && a.relevance_score !== undefined;
-            const scoreCls = !hasScore ? 'rel-none' :
-                             a.relevance_score >= 8 ? 'rel-high' :
-                             a.relevance_score >= 5 ? 'rel-mid' : 'rel-low';
-            const scoreText = hasScore ? a.relevance_score : '—';
-            const titleTrunc = a.title && a.title.length > 60 ? a.title.substring(0, 57) + '...' : (a.title || '--');
-            const reason = a.relevance_reason || (hasScore ? '' : 'Not scored');
-            const reasonTrunc = reason.length > 50 ? reason.substring(0, 47) + '...' : reason;
-            const summary = a.summary ? escapeHtml(a.summary) : '<span style="color:var(--text-muted)">No summary available</span>';
-            return `<tr data-id="${a.id}" style="cursor:pointer" onclick="togglePendingExpand(${a.id}, event)">
-                <td><input type="checkbox" class="pending-check" data-id="${a.id}" checked onchange="updateSelectedCount()"></td>
-                <td><span class="relevance-score ${scoreCls}">${scoreText}</span></td>
-                <td class="text-cell" title="${escapeHtml(a.title)}"><a href="${escapeHtml(a.url || '#')}" target="_blank" rel="noopener" class="article-link">${escapeHtml(titleTrunc)}</a></td>
-                <td>${escapeHtml(a.source || '')}</td>
-                <td>${fmtDate(a.published_date)}</td>
-                <td class="text-cell" title="${escapeHtml(reason)}">${escapeHtml(reasonTrunc)}</td>
-            </tr>
-            <tr class="expand-row hidden" id="pending-expand-${a.id}">
-                <td colspan="6" class="pending-detail">
-                    <div class="pending-detail-reason"><strong>Relevance:</strong> ${escapeHtml(reason)}</div>
-                    <div class="pending-detail-summary">${summary}</div>
-                    ${a.url ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" class="article-link" style="font-size:10px;word-break:break-all">${escapeHtml(a.url)}</a>` : ''}
-                </td>
-            </tr>`;
-        }).join('');
-
-        updateSelectedCount();
-    } catch (err) {
-        console.error('Load pending error:', err);
-    }
-}
-
 function togglePendingExpand(id, event) {
-    // Don't toggle when clicking checkbox or link
     if (event.target.closest('input, a')) return;
     const row = document.getElementById(`pending-expand-${id}`);
     if (row) row.classList.toggle('hidden');
-}
-
-function toggleAllPending(checked) {
-    document.querySelectorAll('.pending-check').forEach(cb => { cb.checked = checked; });
-    updateSelectedCount();
-}
-
-function updateSelectedCount() {
-    const checked = document.querySelectorAll('.pending-check:checked').length;
-    document.getElementById('reviewSelected').textContent = checked;
-}
-
-function _getCheckedIds() {
-    return Array.from(document.querySelectorAll('.pending-check:checked')).map(cb => parseInt(cb.dataset.id));
-}
-
-function _getUncheckedIds() {
-    return Array.from(document.querySelectorAll('.pending-check:not(:checked)')).map(cb => parseInt(cb.dataset.id));
-}
-
-async function approveSelected() {
-    const ids = _getCheckedIds();
-    if (ids.length === 0) return;
-
-    try {
-        const resp = await fetch('/api/control/approve', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ article_ids: ids }),
-        });
-        const data = await resp.json();
-
-        if (data.success) {
-            const statusEl = document.getElementById('statusWebsearch');
-            statusEl.innerHTML = `<span class="task-complete">Approved ${data.approved} articles into database</span>`;
-
-            // Reject any unchecked ones
-            const unchecked = _getUncheckedIds();
-            if (unchecked.length > 0) {
-                await fetch('/api/control/reject', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ article_ids: unchecked }),
-                });
-            }
-
-            document.getElementById('reviewSection').style.display = 'none';
-            renderControl();
-        }
-    } catch (err) {
-        console.error('Approve error:', err);
-    }
-}
-
-async function rejectSelected() {
-    const unchecked = _getUncheckedIds();
-    if (unchecked.length === 0) return;
-
-    try {
-        await fetch('/api/control/reject', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ article_ids: unchecked }),
-        });
-
-        // Reload to show only remaining
-        if (_currentSearchId) {
-            loadPendingArticles(_currentSearchId);
-        }
-    } catch (err) {
-        console.error('Reject error:', err);
-    }
 }
 
 // ── Init ──

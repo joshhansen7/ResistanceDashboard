@@ -112,7 +112,14 @@ def init_db(db_path=None):
             conn.execute("ALTER TABLE articles ADD COLUMN state TEXT")
             conn.execute("UPDATE articles SET state = 'wyoming' WHERE state IS NULL")
             logger.info("Migrated: added state column, defaulted existing records to wyoming")
-        conn.commit()
+        # Migrate: add source_type and state columns to pending_articles
+        pending_cols = [r[1] for r in conn.execute("PRAGMA table_info(pending_articles)").fetchall()]
+        if "source_type" not in pending_cols:
+            conn.execute("ALTER TABLE pending_articles ADD COLUMN source_type TEXT DEFAULT 'websearch'")
+            logger.info("Migrated: added source_type column to pending_articles")
+        if "state" not in pending_cols:
+            conn.execute("ALTER TABLE pending_articles ADD COLUMN state TEXT")
+            logger.info("Migrated: added state column to pending_articles")
         conn.commit()
         logger.info("Database initialized at %s", db_path or DB_PATH)
     finally:
@@ -334,8 +341,9 @@ def insert_pending_article(conn, article_data):
     INSERT INTO pending_articles
         (search_id, source, title, url, published_date, summary,
          matched_keywords, keyword_score, location_relevance,
-         relevance_score, relevance_reason, created_date, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+         relevance_score, relevance_reason, created_date, status,
+         source_type, state)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
     """
     now = datetime.utcnow().isoformat()
     params = (
@@ -351,6 +359,8 @@ def insert_pending_article(conn, article_data):
         article_data.get("relevance_score"),
         article_data.get("relevance_reason"),
         now,
+        article_data.get("source_type", "websearch"),
+        article_data.get("state"),
     )
     cursor = conn.execute(sql, params)
     conn.commit()

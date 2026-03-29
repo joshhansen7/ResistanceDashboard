@@ -1,7 +1,7 @@
 """
-Wyoming Pulse — Web Search
-Searches Google News RSS for articles, scores relevance with Claude API,
-and stores results in a pending review queue.
+Prometheus — Web Search
+Searches Google News RSS for articles across tracked states, scores relevance
+with Claude API, and stores results in the unified pending review queue.
 """
 
 import logging
@@ -15,51 +15,15 @@ import feedparser
 import requests
 
 import db
-from ingest import check_keyword_match, detect_location
+from ingest import check_keyword_match, detect_location, _score_relevance
 from shared import load_config, get_anthropic_client
-from utils import parse_json_response, clean_html, normalize_for_comparison
+from utils import clean_html, normalize_for_comparison
 
 logger = logging.getLogger("wyoming_pulse.websearch")
 
-USER_AGENT = "WyomingPulse/1.0 (News Research; +https://github.com/prometheus-hyperscale)"
+USER_AGENT = "PrometheusDashboard/1.0 (News Research; +https://github.com/prometheus-hyperscale)"
 
-DEFAULT_QUERY = '"Wyoming data center" OR "Prometheus Hyperscale" OR "hyperscale Wyoming"'
-
-RELEVANCE_PROMPT_TEMPLATE = """You are evaluating whether a news article is relevant to tracking data center development in Wyoming, particularly for Prometheus Hyperscale (which has projects in Evanston and Casper, Wyoming).
-
-Rate this article's relevance on a scale of 1-10:
-- 10: Directly about Prometheus Hyperscale or Wyoming data center projects
-- 7-9: About data centers, energy, or infrastructure in Wyoming
-- 4-6: Tangentially related (e.g., national data center trends mentioning Wyoming)
-- 1-3: Not relevant to Wyoming data center development
-
-Return ONLY a JSON object (no markdown fences, no preamble):
-{{"score": <int 1-10>, "reason": "<one sentence explanation>"}}
-
-Article:
-Title: $TITLE
-Source: $SOURCE
-Date: $DATE
-Summary: $SUMMARY"""
-
-
-def _parse_relevance_response(text):
-    """Parse the JSON relevance score from Claude."""
-    result = parse_json_response(text)
-    if result is not None:
-        score = int(result.get("score", 5))
-        score = max(1, min(10, score))
-        reason = result.get("reason", "")
-        return score, reason
-
-    # Regex fallback for malformed JSON
-    score_match = re.search(r'"?score"?\s*[:=]\s*(\d+)', text)
-    reason_match = re.search(r'"?reason"?\s*[:=]\s*"([^"]*)"', text)
-    if score_match:
-        score = max(1, min(10, int(score_match.group(1))))
-        reason = reason_match.group(1) if reason_match else ""
-        return score, reason
-    return 5, "Could not parse relevance score"
+DEFAULT_QUERY = '"data center" Wyoming OR Texas OR Michigan'
 
 
 def _extract_source_from_title(title):
@@ -84,7 +48,6 @@ def _check_title_similarity(title, existing_titles):
         exist_words = set(normalize_for_comparison(existing).split())
         if len(exist_words) < 3:
             continue
-        # Jaccard similarity
         intersection = norm_words & exist_words
         union = norm_words | exist_words
         similarity = len(intersection) / len(union) if union else 0
@@ -94,178 +57,200 @@ def _check_title_similarity(title, existing_titles):
     return False, None
 
 
-def run_websearch(query=None, days_back=30):
+def run_websearch(query=None, days_back=30, state=None):
     """
     Search Google News RSS, score results with Claude, store in pending queue.
+    If state is given, only runs queries for that state.
+    If query is given, uses that instead of per-state queries.
     Returns dict with summary statistics.
     """
     config = load_config()
-    search_query = query.strip() if query else DEFAULT_QUERY
+    pipeline = config.get("pipeline", {})
+    auto_threshold = pipeline.get("auto_approve_threshold")
+    relevance_model = pipeline.get("relevance_model",
+                                    config.get("anthropic", {}).get("classification_model",
+                                                                     "claude-haiku-4-5-20251001"))
+
     search_id = str(uuid.uuid4())[:8]
 
-    # Phase A: Fetch Google News RSS
-    encoded_q = quote_plus(f"{search_query} when:{days_back}d")
-    rss_url = f"https://news.google.com/rss/search?q={encoded_q}&hl=en-US&gl=US&ceid=US:en"
+    # Build list of queries to run
+    queries_to_run = []
+    if query:
+        # Explicit query — run it without state association
+        queries_to_run.append({"query": query.strip(), "state": state})
+    else:
+        # Use per-state web_search_queries from config
+        states = config.get("states", {})
+        for state_key, state_cfg in states.items():
+            if state and state_key != state:
+                continue
+            for q in state_cfg.get("web_search_queries", []):
+                queries_to_run.append({"query": q, "state": state_key})
 
-    logger.info("Searching Google News: %s", search_query)
+        # Fallback: if no per-state queries, use default
+        if not queries_to_run:
+            queries_to_run.append({"query": DEFAULT_QUERY, "state": None})
 
-    try:
-        resp = requests.get(rss_url, headers={"User-Agent": USER_AGENT}, timeout=15)
-        feed = feedparser.parse(resp.content)
-    except Exception as e:
-        logger.error("Failed to fetch Google News RSS: %s", e)
-        return {"error": str(e), "search_id": search_id, "total_results": 0}
+    logger.info("Running %d search queries", len(queries_to_run))
 
-    total_results = len(feed.entries)
-    logger.info("Found %d results from Google News", total_results)
-
-    # Phase A continued: Filter, dedup by URL and title similarity
     db.init_db()
     conn = db.get_connection()
 
-    # Load existing titles for similarity checking (articles + pending)
+    # Load existing titles for similarity checking
     existing_rows = conn.execute("SELECT title FROM articles").fetchall()
     pending_rows = conn.execute(
         "SELECT title FROM pending_articles WHERE status = 'pending'"
     ).fetchall()
     existing_titles = [r["title"] for r in existing_rows] + [r["title"] for r in pending_rows]
 
-    matched_articles = []
+    # Track URLs we've already seen in this search to avoid cross-query duplicates
+    seen_urls = set()
+
+    total_results = 0
     skipped_url = 0
     skipped_title = 0
-    for entry in feed.entries:
-        raw_title = getattr(entry, "title", "") or ""
-        source, title = _extract_source_from_title(raw_title)
-        link = getattr(entry, "link", "") or ""
-        summary = clean_html(getattr(entry, "summary", "") or "")
-        pub_date = None
-        for attr in ("published_parsed", "updated_parsed"):
-            parsed = getattr(entry, attr, None)
-            if parsed:
-                try:
-                    pub_date = datetime(*parsed[:6]).strftime("%Y-%m-%d")
-                except (ValueError, TypeError):
-                    pass
-                break
+    matched_articles = []
 
-        # Dedup: skip if URL already in articles table
-        existing = conn.execute(
-            "SELECT id FROM articles WHERE url = ?", (link,)
-        ).fetchone()
-        if existing:
-            skipped_url += 1
+    for query_info in queries_to_run:
+        search_query = query_info["query"]
+        query_state = query_info["state"]
+
+        encoded_q = quote_plus(f"{search_query} when:{days_back}d")
+        rss_url = f"https://news.google.com/rss/search?q={encoded_q}&hl=en-US&gl=US&ceid=US:en"
+
+        logger.info("Searching: %s [%s]", search_query, query_state or "all")
+
+        try:
+            resp = requests.get(rss_url, headers={"User-Agent": USER_AGENT}, timeout=15)
+            feed = feedparser.parse(resp.content)
+        except Exception as e:
+            logger.error("Failed to fetch Google News RSS: %s", e)
             continue
 
-        # Also skip if already in pending
-        existing_pending = conn.execute(
-            "SELECT id FROM pending_articles WHERE url = ? AND status = 'pending'",
-            (link,),
-        ).fetchone()
-        if existing_pending:
-            skipped_url += 1
-            continue
+        total_results += len(feed.entries)
 
-        # Title similarity check against existing articles
-        is_dup, matched_title = _check_title_similarity(title, existing_titles)
-        if is_dup:
-            skipped_title += 1
-            logger.debug("Title duplicate: '%s' ~ '%s'", title, matched_title)
-            continue
+        for entry in feed.entries:
+            raw_title = getattr(entry, "title", "") or ""
+            source, title = _extract_source_from_title(raw_title)
+            link = getattr(entry, "link", "") or ""
+            summary = clean_html(getattr(entry, "summary", "") or "")
+            pub_date = None
+            for attr in ("published_parsed", "updated_parsed"):
+                parsed = getattr(entry, attr, None)
+                if parsed:
+                    try:
+                        pub_date = datetime(*parsed[:6]).strftime("%Y-%m-%d")
+                    except (ValueError, TypeError):
+                        pass
+                    break
 
-        # Add this title to the list so within-batch duplicates are caught
-        existing_titles.append(title)
+            # Cross-query dedup
+            if link in seen_urls:
+                continue
+            seen_urls.add(link)
 
-        # Keyword filtering
-        keywords, score = check_keyword_match(title, summary, config)
-        location = detect_location(title, summary, config)
+            # URL dedup against articles + pending
+            if link:
+                existing = conn.execute(
+                    "SELECT id FROM articles WHERE url = ?", (link,)
+                ).fetchone()
+                if existing:
+                    skipped_url += 1
+                    continue
+                existing_pending = conn.execute(
+                    "SELECT id FROM pending_articles WHERE url = ? AND status = 'pending'",
+                    (link,),
+                ).fetchone()
+                if existing_pending:
+                    skipped_url += 1
+                    continue
 
-        matched_articles.append({
-            "source": source,
-            "title": title,
-            "url": link,
-            "published_date": pub_date,
-            "summary": summary,
-            "matched_keywords": keywords or [],
-            "keyword_score": score,
-            "location_relevance": location,
-        })
+            # Title similarity check
+            is_dup, matched_title = _check_title_similarity(title, existing_titles)
+            if is_dup:
+                skipped_title += 1
+                logger.debug("Title duplicate: '%s' ~ '%s'", title, matched_title)
+                continue
+
+            existing_titles.append(title)
+
+            # Keyword filtering — try query's state first, then all states
+            keywords, score, matched_state = check_keyword_match(
+                title, summary, config, state_key=query_state
+            )
+            location = detect_location(title, summary, config, state_key=matched_state or query_state)
+
+            matched_articles.append({
+                "source": source,
+                "title": title,
+                "url": link,
+                "published_date": pub_date,
+                "summary": summary,
+                "matched_keywords": keywords or [],
+                "keyword_score": score,
+                "location_relevance": location,
+                "state": matched_state or query_state,
+            })
+
+        time.sleep(1)  # Rate limit between queries
 
     keyword_matches = len(matched_articles)
     logger.info("After dedup: %d new articles (%d URL dupes, %d title dupes)",
                 keyword_matches, skipped_url, skipped_title)
 
-    # Check API key availability early (used for status reporting)
+    # Relevance scoring
     client = get_anthropic_client()
     api_key_set = client is not None
-
-    if not matched_articles:
-        conn.close()
-        db.insert_feed_run(db.get_connection(), "Web Search", total_results, 0, "success")
-        return {
-            "search_id": search_id,
-            "query": search_query,
-            "total_results": total_results,
-            "new_articles": 0,
-            "skipped_url": skipped_url,
-            "skipped_title": skipped_title,
-            "scored": 0,
-            "api_key_set": api_key_set,
-            "days_back": days_back,
-        }
-
-    # Phase B: Claude relevance scoring
-    model = config.get("anthropic", {}).get(
-        "classification_model", "claude-haiku-4-5-20251001"
-    )
     scored = 0
+    auto_approved = 0
 
     for article in matched_articles:
         if client:
-            try:
-                prompt = (RELEVANCE_PROMPT_TEMPLATE
-                    .replace("$TITLE", article["title"])
-                    .replace("$SOURCE", article["source"])
-                    .replace("$DATE", article["published_date"] or "Unknown")
-                    .replace("$SUMMARY", article["summary"][:500])
-                )
-                response = client.messages.create(
-                    model=model,
-                    max_tokens=150,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                text = response.content[0].text
-                score, reason = _parse_relevance_response(text)
-                article["relevance_score"] = score
-                article["relevance_reason"] = reason
-                scored += 1
-                time.sleep(0.3)  # Rate limiting
-            except Exception as e:
-                logger.warning("Relevance scoring failed for '%s': [%s] %s",
-                               article["title"], type(e).__name__, e)
-                article["relevance_score"] = 5
-                article["relevance_reason"] = "Scoring error"
+            rel_score, rel_reason = _score_relevance(client, relevance_model, article)
+            article["relevance_score"] = rel_score
+            article["relevance_reason"] = rel_reason
+            scored += 1
+            time.sleep(0.3)
+
+            # Auto-approve if above threshold
+            if auto_threshold and rel_score >= auto_threshold:
+                article_data = {
+                    "source": article["source"],
+                    "source_type": "websearch",
+                    "title": article["title"],
+                    "url": article["url"],
+                    "published_date": article["published_date"],
+                    "full_text": article["summary"],
+                    "summary": article["summary"],
+                    "matched_keywords": article["matched_keywords"],
+                    "keyword_score": article["keyword_score"],
+                }
+                result = db.insert_article(conn, article_data)
+                if result is not None:
+                    auto_approved += 1
+                    logger.info("Auto-approved: %s (rel=%d)", article["title"][:60], rel_score)
+                continue
         else:
-            # No API key — leave score/reason as None so the UI can show "unscored"
             article["relevance_score"] = None
             article["relevance_reason"] = None
 
-    # Phase C: Store in pending queue
-    for article in matched_articles:
+        # Store in pending queue
         article["search_id"] = search_id
+        article["source_type"] = "websearch"
         db.insert_pending_article(conn, article)
 
-    # Log the search run
     db.insert_feed_run(conn, "Web Search", total_results, keyword_matches, "success")
     conn.close()
 
     return {
         "search_id": search_id,
-        "query": search_query,
+        "query": query or "(per-state queries)",
         "total_results": total_results,
         "new_articles": keyword_matches,
         "skipped_url": skipped_url,
         "skipped_title": skipped_title,
         "scored": scored,
+        "auto_approved": auto_approved,
         "api_key_set": api_key_set,
         "days_back": days_back,
     }
