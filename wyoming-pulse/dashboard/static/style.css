@@ -397,6 +397,13 @@ body::after {
 .key-article-title a:hover {
     color: var(--accent-teal);
 }
+.key-article-reason {
+    font-family: var(--font-data);
+    font-size: 9px;
+    color: var(--text-muted);
+    margin-top: 2px;
+    font-style: italic;
+}
 .key-article-claims {
     font-family: var(--font-data);
     font-size: 10px;
@@ -607,6 +614,18 @@ canvas { max-height: 260px; }
     align-items: center;
     white-space: nowrap;
     min-width: 90px;
+}
+.hm-state-label {
+    font-weight: 600;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 11px;
+}
+.hm-state-label:hover { color: var(--accent-teal); }
+.hm-loc-label {
+    padding-left: 16px;
+    font-size: 10px;
+    color: var(--text-muted);
 }
 
 .hm-cell {
@@ -839,6 +858,20 @@ a.article-link:hover {
 .btn-save-article:hover { opacity: 0.85; }
 .btn-save-article:disabled { opacity: 0.5; cursor: wait; }
 .btn-save-article.hidden { display: none; }
+.btn-delete-article {
+    background: transparent;
+    color: var(--sent-1);
+    border: 1px solid rgba(239,68,68,0.3);
+    font-family: var(--font-data);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 4px 12px;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    border-radius: 3px;
+}
+.btn-delete-article:hover { background: rgba(239,68,68,0.1); }
+.btn-delete-article:disabled { opacity: 0.5; cursor: wait; }
 .save-status {
     font-family: var(--font-data);
     font-size: 10px;

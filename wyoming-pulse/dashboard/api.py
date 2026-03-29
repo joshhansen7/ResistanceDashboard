@@ -287,24 +287,98 @@ def entities():
     try:
         where, params = _state_filter()
         rows = conn.execute(
-            f"SELECT entities_mentioned, sentiment_score FROM articles WHERE {where}",
+            f"SELECT entities_mentioned, sentiment_score, published_date FROM articles WHERE {where}",
             params,
         ).fetchall()
 
-        entity_data = defaultdict(lambda: {"count": 0, "scores": []})
+        cutoff_28d = (datetime.utcnow() - timedelta(days=28)).isoformat()
+        entity_data = defaultdict(lambda: {"count": 0, "scores": [], "recent_scores": []})
         for row in rows:
             ents = json.loads(row["entities_mentioned"]) if row["entities_mentioned"] else []
+            pub = row["published_date"] or ""
             for e in ents:
                 entity_data[e]["count"] += 1
                 if row["sentiment_score"] is not None:
                     entity_data[e]["scores"].append(row["sentiment_score"])
+                    if pub >= cutoff_28d:
+                        entity_data[e]["recent_scores"].append(row["sentiment_score"])
 
         entities_list = []
         for name, data in sorted(entity_data.items(), key=lambda x: x[1]["count"], reverse=True):
             avg = round(sum(data["scores"]) / len(data["scores"]), 2) if data["scores"] else None
-            entities_list.append({"name": name, "count": data["count"], "avg_sentiment": avg})
+            recent_avg = round(sum(data["recent_scores"]) / len(data["recent_scores"]), 2) if data["recent_scores"] else None
+            trend = None
+            if avg is not None and recent_avg is not None:
+                trend = round(recent_avg - avg, 2)
+            entities_list.append({
+                "name": name, "count": data["count"],
+                "avg_sentiment": avg, "recent_avg": recent_avg,
+                "trend": trend, "recent_count": len(data["recent_scores"]),
+            })
 
         return jsonify({"entities": entities_list})
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────
+# /api/location-weekly
+# ──────────────────────────────────────────────
+@bp.route("/location-weekly")
+def location_weekly():
+    """Per-location weekly sentiment for the heatmap."""
+    conn = get_conn()
+    try:
+        weeks_back = request.args.get("weeks_back", 12, type=int)
+        rows = conn.execute(
+            "SELECT state, location_relevance, published_date, sentiment_score "
+            "FROM articles WHERE analyzed = 1 AND published_date IS NOT NULL "
+            "AND state IS NOT NULL "
+            "ORDER BY published_date ASC"
+        ).fetchall()
+
+        # Group by state > location > week
+        from sentiment_index import _week_start
+        from datetime import datetime, timedelta
+        data = {}  # {state: {location: {week: [scores]}}}
+        for r in rows:
+            state = r["state"]
+            loc = r["location_relevance"] or "statewide"
+            ws = _week_start(r["published_date"])
+            if not ws or not state:
+                continue
+            data.setdefault(state, {}).setdefault(loc, {}).setdefault(ws, [])
+            if r["sentiment_score"] is not None:
+                data[state][loc][ws].append(r["sentiment_score"])
+
+        # Build week range
+        now = datetime.utcnow()
+        current_monday = now - timedelta(days=now.weekday())
+        cutoff_monday = current_monday - timedelta(weeks=weeks_back)
+        weeks = []
+        m = cutoff_monday
+        while m <= current_monday:
+            weeks.append(m.strftime("%Y-%m-%d"))
+            m += timedelta(weeks=1)
+
+        # Build result with carry-forward
+        result = {}
+        for state, locations in sorted(data.items()):
+            result[state] = {}
+            for loc, week_scores in sorted(locations.items()):
+                cells = []
+                last_val = None
+                for w in weeks:
+                    scores = week_scores.get(w, [])
+                    if scores:
+                        val = round(sum(scores) / len(scores), 2)
+                        last_val = val
+                        cells.append({"week": w, "avg": val, "count": len(scores), "carried": False})
+                    else:
+                        cells.append({"week": w, "avg": last_val, "count": 0, "carried": last_val is not None})
+                result[state][loc] = cells
+
+        return jsonify({"data": result, "weeks": weeks})
     finally:
         conn.close()
 
@@ -420,6 +494,25 @@ def update_article(article_id):
         )
         conn.commit()
         return jsonify({"success": True, "updated": list(data.keys())})
+    finally:
+        conn.close()
+
+
+@bp.route("/articles/<int:article_id>", methods=["DELETE"])
+def delete_article(article_id):
+    """Permanently delete an article from the database."""
+    conn = get_conn()
+    try:
+        existing = conn.execute(
+            "SELECT id, title FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()
+        if not existing:
+            return jsonify({"error": "Article not found"}), 404
+
+        conn.execute("DELETE FROM articles WHERE id = ?", (article_id,))
+        conn.commit()
+        logger.info("Deleted article %d: %s", article_id, existing["title"][:60])
+        return jsonify({"success": True, "deleted_id": article_id})
     finally:
         conn.close()
 

@@ -609,12 +609,12 @@ async function renderSentiment() {
         const stateFilter = (document.getElementById('sentStateFilter') || {}).value || '';
         const qs = stateFilter ? `?state=${stateFilter}` : '';
 
-        const [wsiData, topics, entities, articlesData, ...locResults] = await Promise.all([
+        const [wsiData, topics, entities, articlesData, locWeekly] = await Promise.all([
             fetchJSON(`/api/sentiment-index${qs}`),
             fetchJSON(`/api/topics${qs}`),
             fetchJSON(`/api/entities${qs}`),
             fetchJSON(`/api/articles?limit=100${stateFilter ? '&state=' + stateFilter : ''}`),
-            ...Object.keys(STATE_CONFIG).map(s => fetchJSON(`/api/locations?state=${s}`)),
+            fetchJSON('/api/location-weekly'),
         ]);
 
         // A: WSI Trend Chart
@@ -623,14 +623,8 @@ async function renderSentiment() {
         // B: Period Comparison Cards
         renderPeriodCards();
 
-        // C: Location Heatmap (weekly)
-        const allLocations = {};
-        Object.keys(STATE_CONFIG).forEach((state, i) => {
-            Object.entries(locResults[i]).forEach(([loc, data]) => {
-                allLocations[`${STATE_ABBR[state] || state}:${loc}`] = data;
-            });
-        });
-        renderLocationHeatmap(wsiData.trend, allLocations);
+        // C: Location Heatmap (weekly, collapsible by state)
+        renderLocationHeatmap(locWeekly);
 
         // D: Topic Sentiment Bars
         renderTopicBars(topics);
@@ -743,40 +737,91 @@ async function renderPeriodCards() {
     } catch (err) { console.error('Period cards error:', err); }
 }
 
-function renderLocationHeatmap(trendData, locations) {
+let _hmExpandedStates = new Set(['wyoming', 'texas', 'michigan']);
+
+function renderLocationHeatmap(locWeekly) {
     const el = document.getElementById('locationHeatmap');
     const noData = document.getElementById('locHeatNoData');
-    if (!trendData || trendData.length === 0) { el.innerHTML = ''; noData.style.display = 'block'; return; }
+    const data = locWeekly?.data;
+    const weeks = locWeekly?.weeks;
+
+    if (!data || !weeks || weeks.length === 0 || Object.keys(data).length === 0) {
+        el.innerHTML = ''; noData.style.display = 'block'; return;
+    }
     noData.style.display = 'none';
+    el._lastData = locWeekly;  // Cache for toggle re-render
 
-    const locs = Object.keys(locations);
-    // Use weekly data — show last 12 weeks for readability
-    const weeks = trendData.filter(t => t.wsi !== null).slice(-12);
-    if (weeks.length === 0) { el.innerHTML = ''; noData.style.display = 'block'; return; }
+    // Sort states alphabetically, skip non-tracked ones
+    const trackedStates = Object.keys(data)
+        .filter(s => s !== 'nationwide' && s !== 'other')
+        .sort();
 
-    el.style.gridTemplateColumns = `120px repeat(${weeks.length}, 34px)`;
+    el.style.gridTemplateColumns = `140px repeat(${weeks.length}, 34px)`;
 
     let html = '<div class="hm-label"></div>';
-    weeks.forEach(w => { html += `<div class="hm-header">${fmtDate(w.week)}</div>`; });
+    weeks.forEach(w => { html += `<div class="hm-header">${fmtDate(w)}</div>`; });
 
-    locs.forEach(loc => {
-        const [stateAbbr, locName] = loc.split(':');
-        const displayName = `${stateAbbr} ${locName.replace(/_/g, ' ')}`;
-        const shortName = displayName.length > 16 ? displayName.substring(0, 14) + '..' : displayName;
-        html += `<div class="hm-label" title="${displayName}">${shortName}</div>`;
+    trackedStates.forEach(state => {
+        const stateAbbr = STATE_ABBR[state] || state.toUpperCase().substring(0, 2);
+        const stateName = capitalize(state);
+        const isExpanded = _hmExpandedStates.has(state);
+        const arrow = isExpanded ? '\u25BC' : '\u25B6';
+        const locations = data[state] || {};
+        const locKeys = Object.keys(locations).sort((a, b) => {
+            if (a === 'statewide') return -1;
+            if (b === 'statewide') return 1;
+            return a.localeCompare(b);
+        });
+
+        // State header row (clickable)
+        html += `<div class="hm-label hm-state-label" onclick="toggleHmState('${state}')" title="Click to ${isExpanded ? 'collapse' : 'expand'}">${arrow} ${stateAbbr} ${stateName}</div>`;
+        // State-level aggregate: average across all locations per week
         weeks.forEach(w => {
-            const locAvg = locations[loc]?.avg;
-            const weekWsi = w.wsi;
-            const val = locAvg !== null && locAvg !== undefined && weekWsi !== null ? (weekWsi * 0.5 + locAvg * 0.5) : null;
-            if (val !== null) {
-                html += `<div class="hm-cell" style="background:${sentimentColor(val)};opacity:0.8" data-tip="${displayName} | ${fmtDate(w.week)} | ${val.toFixed(1)}"></div>`;
+            const allScores = [];
+            locKeys.forEach(loc => {
+                const cells = locations[loc] || [];
+                const cell = cells.find(c => c.week === w);
+                if (cell && cell.avg !== null && !cell.carried) allScores.push(cell.avg);
+            });
+            if (allScores.length > 0) {
+                const avg = allScores.reduce((a, b) => a + b, 0) / allScores.length;
+                html += `<div class="hm-cell" style="background:${sentimentColor(avg)}" data-tip="${stateName} | ${fmtDate(w)} | ${avg.toFixed(1)} (n=${allScores.length})"></div>`;
             } else {
-                html += `<div class="hm-cell empty" data-tip="${displayName} | ${fmtDate(w.week)} | --"></div>`;
+                html += `<div class="hm-cell empty" data-tip="${stateName} | ${fmtDate(w)} | --"></div>`;
             }
         });
+
+        // Location rows (collapsible)
+        if (isExpanded) {
+            locKeys.forEach(loc => {
+                const locDisplay = loc.replace(/_/g, ' ');
+                const locLabel = `${locDisplay}`;
+                const cells = locations[loc] || [];
+                html += `<div class="hm-label hm-loc-label">${locLabel}</div>`;
+                weeks.forEach(w => {
+                    const cell = cells.find(c => c.week === w);
+                    if (cell && cell.avg !== null) {
+                        const opacity = cell.carried ? '0.35' : '0.85';
+                        const suffix = cell.carried ? ' (carried)' : ` (n=${cell.count})`;
+                        html += `<div class="hm-cell" style="background:${sentimentColor(cell.avg)};opacity:${opacity}" data-tip="${stateName} / ${locDisplay} | ${fmtDate(w)} | ${cell.avg.toFixed(1)}${suffix}"></div>`;
+                    } else {
+                        html += `<div class="hm-cell empty" data-tip="${stateName} / ${locDisplay} | ${fmtDate(w)} | --"></div>`;
+                    }
+                });
+            });
+        }
     });
+
     el.innerHTML = html;
     attachHmTooltips(el);
+}
+
+function toggleHmState(state) {
+    if (_hmExpandedStates.has(state)) _hmExpandedStates.delete(state);
+    else _hmExpandedStates.add(state);
+    // Re-render from cached data
+    const el = document.getElementById('locationHeatmap');
+    if (el._lastData) renderLocationHeatmap(el._lastData);
 }
 
 function renderTopicBars(topicData) {
@@ -800,7 +845,7 @@ function renderTopicBars(topicData) {
     charts.topicBar = new Chart(canvas, {
         type: 'bar',
         data: {
-            labels: sorted.map(t => `${topicDisplay(t.name)} (n=${t.count})`),
+            labels: sorted.map(t => `${topicDisplay(t.name)}  (${t.count})`),
             datasets: [{
                 data: sorted.map(t => t.avg_sentiment),
                 backgroundColor: sorted.map(t => sentimentColor(t.avg_sentiment)),
@@ -812,7 +857,16 @@ function renderTopicBars(topicData) {
             indexAxis: 'y',
             responsive: true,
             maintainAspectRatio: false,
-            plugins: { legend: { display: false }, tooltip: ttCfg },
+            plugins: {
+                legend: { display: false },
+                tooltip: { ...ttCfg, callbacks: {
+                    label: ctx => {
+                        const t = sorted[ctx.dataIndex];
+                        const dev = Math.abs(t.avg_sentiment - 3.0).toFixed(1);
+                        return `avg: ${t.avg_sentiment.toFixed(2)} | ${t.count} articles | ${dev}pt from neutral`;
+                    }
+                } },
+            },
             scales: {
                 x: { min: 1, max: 5, grid: { color: 'rgba(26,31,46,0.5)' },
                      ticks: { stepSize: 1, font: { family: "'JetBrains Mono', monospace", size: 9 },
@@ -856,11 +910,20 @@ function _renderEntityRows() {
     });
 
     const tbody = document.getElementById('entityBody');
-    tbody.innerHTML = sorted.slice(0, 20).map(e => `<tr>
-        <td class="text-cell">${escapeHtml(e.name)}</td>
-        <td>${e.count}</td>
-        <td><span style="color:${sentimentColor(e.avg_sentiment)}">${e.avg_sentiment !== null ? e.avg_sentiment.toFixed(2) : '--'}</span></td>
-    </tr>`).join('');
+    tbody.innerHTML = sorted.slice(0, 20).map(e => {
+        let trendHtml = '--';
+        if (e.trend !== null && e.trend !== undefined) {
+            const arrow = e.trend > 0.05 ? '\u25B2' : e.trend < -0.05 ? '\u25BC' : '\u25C6';
+            const color = e.trend > 0.05 ? 'var(--sent-5)' : e.trend < -0.05 ? 'var(--sent-1)' : 'var(--sent-3)';
+            trendHtml = `<span style="color:${color}">${arrow} ${e.trend > 0 ? '+' : ''}${e.trend.toFixed(2)}</span>`;
+        }
+        return `<tr>
+            <td class="text-cell">${escapeHtml(e.name)}</td>
+            <td>${e.count}${e.recent_count ? ` <span style="color:var(--text-muted);font-size:9px">(${e.recent_count} recent)</span>` : ''}</td>
+            <td><span style="color:${sentimentColor(e.avg_sentiment)}">${e.avg_sentiment !== null ? e.avg_sentiment.toFixed(2) : '--'}</span></td>
+            <td>${trendHtml}</td>
+        </tr>`;
+    }).join('');
 }
 
 function renderKeyArticles(articles) {
@@ -880,16 +943,27 @@ function renderKeyArticles(articles) {
         .sort((a, b) => Math.abs(b.sentiment_score - 3.0) - Math.abs(a.sentiment_score - 3.0))
         .slice(0, 8);
 
-    container.innerHTML = sorted.map(a => `<div class="key-article">
-        <div class="key-article-header">
-            <span class="pill ${sentimentPillClass(a.sentiment_label)}">${sentimentLabel(a.sentiment_label)}</span>
-            <span class="key-article-score" style="color:${sentimentColor(a.sentiment_score)}">${a.sentiment_score.toFixed(1)}</span>
-            <span class="key-article-meta">${escapeHtml(a.source || '')} &mdash; ${fmtDate(a.published_date)}</span>
-            <span class="pill pill-state">${STATE_ABBR[a.state] || ''}</span>
-        </div>
-        <div class="key-article-title">${a.url ? `<a href="${a.url}" target="_blank" rel="noopener">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}</div>
-        ${a.key_claims ? `<div class="key-article-claims">${escapeHtml(a.key_claims)}</div>` : ''}
-    </div>`).join('');
+    container.innerHTML = sorted.map(a => {
+        const dev = Math.abs(a.sentiment_score - 3.0).toFixed(1);
+        const direction = a.sentiment_score >= 3.0 ? 'positive' : 'negative';
+        const reason = `${dev} points ${direction} of neutral \u2014 ` +
+            (a.sentiment_score >= 4.5 ? 'strongly favorable framing' :
+             a.sentiment_score >= 3.5 ? 'optimistic tone with caveats' :
+             a.sentiment_score >= 2.5 ? 'mixed or balanced coverage' :
+             a.sentiment_score >= 1.5 ? 'skeptical or cautionary tone' :
+             'strong opposition framing');
+        return `<div class="key-article">
+            <div class="key-article-header">
+                <span class="pill ${sentimentPillClass(a.sentiment_label)}">${sentimentLabel(a.sentiment_label)}</span>
+                <span class="key-article-score" style="color:${sentimentColor(a.sentiment_score)}">${a.sentiment_score.toFixed(1)}</span>
+                <span class="key-article-meta">${escapeHtml(a.source || '')} \u2014 ${fmtDate(a.published_date)}</span>
+                <span class="pill pill-state">${STATE_ABBR[a.state] || ''}</span>
+            </div>
+            <div class="key-article-title">${a.url ? `<a href="${a.url}" target="_blank" rel="noopener">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}</div>
+            <div class="key-article-reason">${reason}</div>
+            ${a.key_claims ? `<div class="key-article-claims">${escapeHtml(a.key_claims)}</div>` : ''}
+        </div>`;
+    }).join('');
 }
 
 function attachHmTooltips(container) {
@@ -1074,6 +1148,7 @@ async function renderArticles(append = false) {
                             ${a.summary ? `<div class="article-detail-section"><div class="article-detail-label">SUMMARY</div><div class="article-detail-claims">${escapeHtml(a.summary)}</div></div>` : ''}
                             <div class="article-detail-actions">
                                 <button class="btn-save-article hidden" onclick="saveArticle(this, ${a.id})">SAVE CHANGES</button>
+                                <button class="btn-delete-article" onclick="deleteArticle(this, ${a.id})">DELETE</button>
                                 <span class="save-status"></span>
                             </div>
                         </div>
@@ -1168,6 +1243,35 @@ async function saveArticle(btn, articleId) {
     }
     btn.disabled = false;
     btn.textContent = 'SAVE CHANGES';
+}
+
+async function deleteArticle(btn, articleId) {
+    if (!confirm('Permanently delete this article? This cannot be undone.')) return;
+    btn.disabled = true;
+    btn.textContent = 'DELETING...';
+    const status = btn.closest('.article-detail-actions').querySelector('.save-status');
+    try {
+        const resp = await fetch(`/api/articles/${articleId}`, { method: 'DELETE' });
+        if (resp.ok) {
+            // Remove both the data row and expand row from the table
+            const expandRow = btn.closest('.expand-row');
+            const dataRow = expandRow.previousElementSibling;
+            if (dataRow) dataRow.remove();
+            expandRow.remove();
+            status.textContent = '';
+        } else {
+            const err = await resp.json();
+            status.textContent = err.error || 'Delete failed';
+            status.style.color = 'var(--sent-1)';
+            btn.disabled = false;
+            btn.textContent = 'DELETE';
+        }
+    } catch (e) {
+        status.textContent = 'Network error';
+        status.style.color = 'var(--sent-1)';
+        btn.disabled = false;
+        btn.textContent = 'DELETE';
+    }
 }
 
 function loadMoreArticles() {
