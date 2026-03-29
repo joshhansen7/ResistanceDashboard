@@ -210,6 +210,7 @@ def locations():
         state_locations = {
             "wyoming": ["evanston", "casper", "cheyenne", "statewide"],
             "texas": ["dallas", "statewide"],
+            "michigan": ["ann_arbor", "van_buren", "benton_harbor", "statewide"],
         }
         locs = state_locations.get(state, ["statewide"])
         result = {}
@@ -527,6 +528,7 @@ def control_add_article():
     try:
         row_id = db.insert_article(conn, article_data)
         if row_id:
+            conn.commit()
             return jsonify({"success": True, "article_id": row_id})
         return jsonify({"success": False, "error": "Duplicate article (URL already exists)"}), 409
     finally:

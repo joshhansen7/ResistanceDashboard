@@ -20,8 +20,8 @@ Analyze the following article and return a JSON object (no markdown fences, no p
   "sentiment_score": <float 1.0-5.0>,
   "sentiment_label": "<strongly_negative|slightly_negative|neutral|slightly_positive|strongly_positive>",
   "voice_type": "<elite|public>",
-  "state": "<wyoming|texas|nationwide|other>",
-  "location_relevance": "<statewide|evanston|casper|cheyenne|dallas|nationwide|other>",
+  "state": "<wyoming|texas|michigan|nationwide|other>",
+  "location_relevance": "<statewide|evanston|casper|cheyenne|dallas|ann_arbor|van_buren|benton_harbor|nationwide|other>",
   "topic_tags": ["<from: energy_ratepayer, water, jobs_economic, land_use_wildlife, regulation_transparency, tax_incentives, national_security_ai, community_impact>"],
   "entities_mentioned": ["<company or organization names>"],
   "key_claims": "<1-2 sentence summary of the most notable claims or narratives>",
@@ -30,7 +30,7 @@ Analyze the following article and return a JSON object (no markdown fences, no p
 
 State and location rules:
 - "state": the US state the article primarily concerns. Use "nationwide" for federal/national policy with no single state focus. Use "other" for states not listed.
-- "location_relevance": the specific city/region within the state. Use "statewide" when the article covers a whole state without a specific city focus. Use "nationwide" only when state is also "nationwide". Wyoming cities: evanston, casper, cheyenne. Texas cities: dallas.
+- "location_relevance": the specific city/region within the state. Use "statewide" when the article covers a whole state without a specific city focus. Use "nationwide" only when state is also "nationwide". Wyoming cities: evanston, casper, cheyenne. Texas cities: dallas. Michigan locations: ann_arbor (Ann Arbor / Saline Township / Washtenaw County), van_buren (Van Buren Township / Wayne County), benton_harbor (Benton Township / Benton Harbor / Berrien County).
 
 Sentiment scale:
 1.0 = Strongly negative (active opposition, calls for moratorium, fear-based)

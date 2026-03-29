@@ -23,11 +23,25 @@ Chart.defaults.font.size = 11;
 // ══════════════════════════════════════════════
 function sentimentColor(score) {
     if (score === null || score === undefined) return '#374151';
-    if (score >= 4.5) return '#22c55e';
-    if (score >= 3.5) return '#84cc16';
-    if (score >= 2.5) return '#eab308';
-    if (score >= 1.5) return '#f97316';
-    return '#ef4444';
+    // Smooth gradient: 1.0 (red) → 3.0 (yellow) → 5.0 (green)
+    const t = Math.max(0, Math.min(1, (score - 1) / 4)); // normalize 1-5 to 0-1
+    // Color stops: #ef4444 (0) → #f97316 (0.25) → #eab308 (0.5) → #84cc16 (0.75) → #22c55e (1.0)
+    const stops = [
+        [0.00, [239, 68, 68]],   // red
+        [0.25, [249, 115, 22]],  // orange
+        [0.50, [234, 179, 8]],   // yellow
+        [0.75, [132, 204, 22]],  // lime
+        [1.00, [34, 197, 94]],   // green
+    ];
+    let i = 0;
+    while (i < stops.length - 1 && stops[i + 1][0] < t) i++;
+    if (i >= stops.length - 1) return `rgb(${stops[stops.length - 1][1].join(',')})`;
+    const [t0, c0] = stops[i], [t1, c1] = stops[i + 1];
+    const f = (t - t0) / (t1 - t0);
+    const r = Math.round(c0[0] + f * (c1[0] - c0[0]));
+    const g = Math.round(c0[1] + f * (c1[1] - c0[1]));
+    const b = Math.round(c0[2] + f * (c1[2] - c0[2]));
+    return `rgb(${r},${g},${b})`;
 }
 
 function sentimentPillClass(label) {
@@ -161,11 +175,23 @@ const STATE_CONFIG = {
         },
         cityCountyFips: { dallas: '48113' },
     },
+    michigan: {
+        fips: '26',
+        name: 'Michigan',
+        cities: {
+            ann_arbor:      [-83.7430, 42.2808],
+            van_buren:      [-83.4858, 42.2182],
+            benton_harbor:  [-86.4542, 42.1167],
+        },
+        cityCountyFips: { ann_arbor: '26161', van_buren: '26163', benton_harbor: '26021' },
+        labelOffsets: { ann_arbor: [8, -10], van_buren: [8, 16] },
+    },
 };
 
 const STATE_NAME_TO_KEY = {
     'Wyoming': 'wyoming',
     'Texas': 'texas',
+    'Michigan': 'michigan',
 };
 
 // ── Tooltip positioning helper ──
@@ -365,20 +391,22 @@ async function drillIntoState(stateKey) {
         }
 
         // City markers
+        const labelOffsets = config.labelOffsets || {};
         Object.entries(config.cities).forEach(([city, coords]) => {
             const projected = projection(coords);
             if (projected) {
                 const [x, y] = projected;
+                const [lx, ly] = labelOffsets[city] || [8, 4];
                 svg.append('circle').attr('cx', x).attr('cy', y).attr('r', 3).attr('class', 'map-marker-pulse');
                 svg.append('circle').attr('cx', x).attr('cy', y).attr('r', 3).attr('class', 'map-marker-dot');
                 svg.append('text')
-                    .attr('x', x + 8).attr('y', y + 4)
+                    .attr('x', x + lx).attr('y', y + ly)
                     .attr('fill', '#e2e8f0')
                     .attr('font-family', "'JetBrains Mono', monospace")
                     .attr('font-size', '9px')
                     .attr('font-weight', '600')
                     .style('filter', 'drop-shadow(0 0 3px rgba(0,0,0,0.8)) drop-shadow(0 0 6px rgba(0,0,0,0.5))')
-                    .text(city.toUpperCase());
+                    .text(city.replace(/_/g, ' ').toUpperCase());
             }
         });
 
@@ -670,30 +698,31 @@ async function renderDistribution() {
 // ══════════════════════════════════════════════
 //  PAGE 3: ARTICLES (table with expandable rows)
 // ══════════════════════════════════════════════
-const STATE_ABBR = { wyoming: 'WY', texas: 'TX', nationwide: 'US', other: '??' };
+const STATE_ABBR = { wyoming: 'WY', texas: 'TX', michigan: 'MI', nationwide: 'US', other: '??' };
 const STATE_REGIONS = {
     wyoming: ['statewide', 'evanston', 'casper', 'cheyenne'],
     texas: ['statewide', 'dallas'],
+    michigan: ['statewide', 'ann_arbor', 'van_buren', 'benton_harbor'],
     nationwide: [],
 };
 
 function onStateFilterChange() {
     const state = document.getElementById('filterState').value;
     const locSelect = document.getElementById('filterLocation');
-    const wyGroup = document.getElementById('filterLocWY');
-    const txGroup = document.getElementById('filterLocTX');
+    const groups = {
+        wyoming:  document.getElementById('filterLocWY'),
+        texas:    document.getElementById('filterLocTX'),
+        michigan: document.getElementById('filterLocMI'),
+    };
     locSelect.value = '';
     if (!state) {
-        wyGroup.style.display = '';
-        txGroup.style.display = '';
+        Object.values(groups).forEach(g => g.style.display = '');
         locSelect.disabled = false;
     } else if (state === 'nationwide') {
-        wyGroup.style.display = 'none';
-        txGroup.style.display = 'none';
+        Object.values(groups).forEach(g => g.style.display = 'none');
         locSelect.disabled = true;
     } else {
-        wyGroup.style.display = state === 'wyoming' ? '' : 'none';
-        txGroup.style.display = state === 'texas' ? '' : 'none';
+        Object.entries(groups).forEach(([k, g]) => g.style.display = k === state ? '' : 'none');
         locSelect.disabled = false;
     }
     renderArticles();
@@ -766,6 +795,7 @@ async function renderArticles(append = false) {
                                         <select class="detail-select" data-field="state" onchange="onDetailStateChange(this); markArticleDirty(this)">
                                             <option value="wyoming" ${a.state==='wyoming'?'selected':''}>Wyoming</option>
                                             <option value="texas" ${a.state==='texas'?'selected':''}>Texas</option>
+                                            <option value="michigan" ${a.state==='michigan'?'selected':''}>Michigan</option>
                                             <option value="nationwide" ${a.state==='nationwide'?'selected':''}>Nationwide</option>
                                             <option value="other" ${a.state==='other'?'selected':''}>Other</option>
                                         </select>
@@ -826,8 +856,9 @@ async function renderArticles(append = false) {
 }
 
 const REGION_OPTIONS = {
-    wyoming: [['statewide','Statewide'],['evanston','Evanston'],['casper','Casper'],['cheyenne','Cheyenne']],
-    texas:   [['statewide','TX Statewide'],['dallas','Dallas']],
+    wyoming:  [['statewide','Statewide'],['evanston','Evanston'],['casper','Casper'],['cheyenne','Cheyenne']],
+    texas:    [['statewide','TX Statewide'],['dallas','Dallas']],
+    michigan: [['statewide','MI Statewide'],['ann_arbor','Ann Arbor'],['van_buren','Van Buren'],['benton_harbor','Benton Harbor']],
     nationwide: [['nationwide','Nationwide']],
     other:   [['other','Other']],
 };

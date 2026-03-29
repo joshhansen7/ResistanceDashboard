@@ -163,6 +163,7 @@
                     <option value="">All States</option>
                     <option value="wyoming">Wyoming</option>
                     <option value="texas">Texas</option>
+                    <option value="michigan">Michigan</option>
                     <option value="nationwide">Nationwide</option>
                 </select>
                 <select id="filterLocation" onchange="renderArticles()">
@@ -176,6 +177,12 @@
                     <optgroup id="filterLocTX" label="Texas">
                         <option value="statewide" data-state="texas">TX Statewide</option>
                         <option value="dallas" data-state="texas">Dallas</option>
+                    </optgroup>
+                    <optgroup id="filterLocMI" label="Michigan">
+                        <option value="statewide" data-state="michigan">MI Statewide</option>
+                        <option value="ann_arbor" data-state="michigan">Ann Arbor</option>
+                        <option value="van_buren" data-state="michigan">Van Buren</option>
+                        <option value="benton_harbor" data-state="michigan">Benton Harbor</option>
                     </optgroup>
                 </select>
                 <select id="filterSentiment" onchange="renderArticles()">
