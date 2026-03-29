@@ -35,6 +35,10 @@
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             <span>System</span>
         </button>
+        <button class="nav-item" data-page="control" onclick="switchPage('control')">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            <span>Control</span>
+        </button>
     </nav>
 
     <div class="sidebar-footer">
@@ -215,6 +219,148 @@
 
             <div class="sh">Database</div>
             <div class="kv-row" id="dbStats"></div>
+        </div>
+    </div>
+
+    <!-- PAGE: CONTROL -->
+    <div id="page-control" class="page">
+        <div class="page-header">
+            <h1>Control</h1>
+            <span class="page-sub">operations &amp; data entry</span>
+        </div>
+        <div class="page-content">
+
+            <!-- Manual Article Entry -->
+            <div class="control-section">
+                <div class="sh">Manual Article Entry</div>
+                <p class="control-desc">Add an article directly to the database. It will be queued for sentiment analysis.</p>
+                <form class="control-form" id="articleForm" onsubmit="submitArticle(event)">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Source</label>
+                            <input type="text" id="ctrlSource" placeholder="e.g. Cowboy State Daily">
+                        </div>
+                        <div class="form-group">
+                            <label>Source Type</label>
+                            <select id="ctrlSourceType">
+                                <option value="news">News</option>
+                                <option value="social_media">Social Media</option>
+                                <option value="legislative">Legislative</option>
+                                <option value="opinion">Opinion</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Date</label>
+                            <input type="date" id="ctrlDate">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Title <span class="required">*</span></label>
+                        <input type="text" id="ctrlTitle" placeholder="Article title" required>
+                    </div>
+                    <div class="form-group">
+                        <label>URL</label>
+                        <input type="text" id="ctrlUrl" placeholder="https://...">
+                    </div>
+                    <div class="form-group">
+                        <label>Full Text</label>
+                        <textarea id="ctrlText" rows="4" placeholder="Paste article text or summary..."></textarea>
+                    </div>
+                    <button type="submit" class="btn-action" id="btnSubmitArticle">Submit Article</button>
+                    <div class="task-status" id="statusArticle"></div>
+                </form>
+            </div>
+
+            <!-- Web Search -->
+            <div class="control-section">
+                <div class="sh">Web Search</div>
+                <p class="control-desc">Search Google News for articles. Results are scored for relevance by Claude and queued for your review.</p>
+                <div class="control-form">
+                    <div class="form-group">
+                        <label>Search Query</label>
+                        <input type="text" id="ctrlSearchQuery" placeholder="&quot;Wyoming data center&quot; OR &quot;Prometheus Hyperscale&quot;">
+                    </div>
+                    <div class="form-row" style="grid-template-columns: 1fr auto auto;">
+                        <div class="form-group">
+                            <label>Time Range</label>
+                            <select id="ctrlSearchDays">
+                                <option value="7">Last 7 days</option>
+                                <option value="14">Last 14 days</option>
+                                <option value="30" selected>Last 30 days</option>
+                                <option value="60">Last 60 days</option>
+                                <option value="90">Last 90 days</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="justify-content: flex-end;">
+                            <label>&nbsp;</label>
+                            <button type="button" class="btn-action" id="btnWebsearch" onclick="runWebSearch()">Search</button>
+                        </div>
+                    </div>
+                    <div class="task-status" id="statusWebsearch"></div>
+                </div>
+
+                <!-- Review Table (hidden until results arrive) -->
+                <div id="reviewSection" style="display:none;">
+                    <div class="review-header">
+                        <div class="review-summary">
+                            <span id="reviewCount">0</span> articles found &mdash;
+                            <span id="reviewSelected">0</span> selected
+                        </div>
+                        <div class="review-actions">
+                            <button class="btn-action btn-approve" onclick="approveSelected()">Approve Selected</button>
+                            <button class="btn-action btn-reject" onclick="rejectSelected()">Reject Unselected</button>
+                        </div>
+                    </div>
+                    <table class="dt review-table" id="reviewTable">
+                        <thead>
+                            <tr>
+                                <th style="width:30px"><input type="checkbox" id="selectAll" onchange="toggleAllPending(this.checked)"></th>
+                                <th style="width:50px">Score</th>
+                                <th>Title</th>
+                                <th>Source</th>
+                                <th>Date</th>
+                                <th>Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody id="reviewBody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Operations Grid -->
+            <div class="control-grid">
+                <div class="control-section">
+                    <div class="sh">RSS Feed Scrape</div>
+                    <p class="control-desc">Fetch all configured RSS feeds and import matching articles.</p>
+                    <button class="btn-action" id="btnIngest" onclick="runTask('ingest')">Run Ingestion</button>
+                    <div class="task-status" id="statusIngest"></div>
+                </div>
+                <div class="control-section">
+                    <div class="sh">Sentiment Analysis</div>
+                    <p class="control-desc">Analyze pending articles via Claude API for sentiment classification.</p>
+                    <button class="btn-action" id="btnAnalysis" onclick="runTask('analysis')">Run Analysis</button>
+                    <div class="task-status" id="statusAnalysis"></div>
+                </div>
+                <div class="control-section">
+                    <div class="sh">Generate Digest</div>
+                    <p class="control-desc">Generate a biweekly intelligence digest from analyzed articles.</p>
+                    <button class="btn-action" id="btnDigest" onclick="runTask('digest')">Generate Digest</button>
+                    <div class="task-status" id="statusDigest"></div>
+                </div>
+            </div>
+
+            <!-- Recent Tasks -->
+            <div class="control-section">
+                <div class="sh">Recent Tasks</div>
+                <table class="dt" id="taskTable">
+                    <thead>
+                        <tr><th>Type</th><th>Status</th><th>Started</th><th>Duration</th><th>Result</th></tr>
+                    </thead>
+                    <tbody id="taskBody"></tbody>
+                </table>
+                <div class="no-data" id="taskNoData" style="display:none">No recent tasks</div>
+            </div>
+
         </div>
     </div>
 

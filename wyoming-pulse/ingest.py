@@ -11,23 +11,14 @@ from datetime import datetime
 
 import feedparser
 import requests
-import yaml
-from pathlib import Path
 
 import db
+from shared import load_config  # noqa: F401 — re-exported for backward compat
 
 logger = logging.getLogger("wyoming_pulse.ingest")
 
-CONFIG_PATH = Path(__file__).parent / "config.yaml"
-
 # User-agent to avoid being blocked by news sites
 USER_AGENT = "WyomingPulse/1.0 (RSS Feed Reader; +https://github.com/prometheus-hyperscale)"
-
-
-def load_config():
-    """Load configuration from config.yaml."""
-    with open(CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f)
 
 
 def normalize_text(text):

@@ -4,6 +4,10 @@ All /api/* routes returning JSON for the frontend.
 """
 
 import json
+import logging
+import threading
+import traceback
+import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -11,7 +15,48 @@ from flask import Blueprint, current_app, jsonify, request, send_file
 
 import db
 
+logger = logging.getLogger("wyoming_pulse.api")
+
 bp = Blueprint("api", __name__, url_prefix="/api")
+
+# ──────────────────────────────────────────────
+# Background task runner
+# ──────────────────────────────────────────────
+_tasks = {}
+_tasks_lock = threading.Lock()
+
+
+def _run_in_background(task_type, target_fn, **kwargs):
+    """Spawn a daemon thread to run target_fn. Returns task_id immediately."""
+    task_id = str(uuid.uuid4())[:8]
+    with _tasks_lock:
+        _tasks[task_id] = {
+            "task_id": task_id,
+            "type": task_type,
+            "status": "running",
+            "started": datetime.utcnow().isoformat(),
+            "finished": None,
+            "result": None,
+            "error": None,
+        }
+
+    def _worker():
+        try:
+            result = target_fn(**kwargs)
+            with _tasks_lock:
+                _tasks[task_id]["status"] = "completed"
+                _tasks[task_id]["finished"] = datetime.utcnow().isoformat()
+                _tasks[task_id]["result"] = result
+        except Exception as e:
+            logger.error("Task %s (%s) failed: %s", task_id, task_type, e)
+            with _tasks_lock:
+                _tasks[task_id]["status"] = "error"
+                _tasks[task_id]["finished"] = datetime.utcnow().isoformat()
+                _tasks[task_id]["error"] = str(e)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return task_id
 
 
 def get_conn():
@@ -369,3 +414,165 @@ def export_report():
     from .export import generate_export_html
     html_path = generate_export_html(current_app.config["DB_PATH"])
     return send_file(html_path, as_attachment=True, download_name="wyoming_pulse_report.html")
+
+
+# ──────────────────────────────────────────────
+# /api/control/* — Control Panel Endpoints
+# ──────────────────────────────────────────────
+
+@bp.route("/control/add-article", methods=["POST"])
+def control_add_article():
+    """Manually add a single article."""
+    data = request.get_json(force=True)
+    title = (data.get("title") or "").strip()
+    if not title:
+        return jsonify({"success": False, "error": "Title is required"}), 400
+
+    article_data = {
+        "source": data.get("source", "Manual Entry").strip(),
+        "source_type": data.get("source_type", "news"),
+        "title": title,
+        "url": data.get("url", "").strip() or None,
+        "published_date": data.get("published_date", datetime.utcnow().strftime("%Y-%m-%d")),
+        "full_text": data.get("full_text", ""),
+        "summary": (data.get("full_text") or "")[:500],
+        "matched_keywords": ["manual_entry"],
+        "keyword_score": 1.0,
+    }
+
+    conn = get_conn()
+    try:
+        row_id = db.insert_article(conn, article_data)
+        if row_id:
+            return jsonify({"success": True, "article_id": row_id})
+        return jsonify({"success": False, "error": "Duplicate article (URL already exists)"}), 409
+    finally:
+        conn.close()
+
+
+@bp.route("/control/run-ingest", methods=["POST"])
+def control_run_ingest():
+    """Trigger RSS feed ingestion in background."""
+    import ingest
+    task_id = _run_in_background("ingest", ingest.ingest_feeds)
+    return jsonify({"task_id": task_id})
+
+
+@bp.route("/control/run-analysis", methods=["POST"])
+def control_run_analysis():
+    """Trigger sentiment analysis in background."""
+    import analyze
+    task_id = _run_in_background("analysis", analyze.analyze_articles)
+    return jsonify({"task_id": task_id})
+
+
+@bp.route("/control/run-digest", methods=["POST"])
+def control_run_digest():
+    """Trigger digest generation in background."""
+    import digest
+    task_id = _run_in_background("digest", digest.generate_digest)
+    return jsonify({"task_id": task_id})
+
+
+@bp.route("/control/run-websearch", methods=["POST"])
+def control_run_websearch():
+    """Trigger web search with optional query and date range."""
+    import websearch
+    data = request.get_json(silent=True) or {}
+    query = (data.get("query") or "").strip() or None
+    days_back = data.get("days_back", 30)
+    try:
+        days_back = int(days_back)
+    except (ValueError, TypeError):
+        days_back = 30
+    task_id = _run_in_background("websearch", websearch.run_websearch,
+                                  query=query, days_back=days_back)
+    return jsonify({"task_id": task_id})
+
+
+@bp.route("/control/pending")
+def control_pending():
+    """Get pending articles for review."""
+    search_id = request.args.get("search_id", "")
+    conn = get_conn()
+    try:
+        rows = db.get_pending_articles(conn, search_id or None)
+        articles = []
+        for r in rows:
+            articles.append({
+                "id": r["id"],
+                "search_id": r["search_id"],
+                "source": r["source"],
+                "title": r["title"],
+                "url": r["url"],
+                "published_date": r["published_date"],
+                "summary": r["summary"],
+                "matched_keywords": json.loads(r["matched_keywords"]) if r["matched_keywords"] else [],
+                "keyword_score": r["keyword_score"],
+                "location_relevance": r["location_relevance"],
+                "relevance_score": r["relevance_score"],
+                "relevance_reason": r["relevance_reason"],
+                "created_date": r["created_date"],
+            })
+        return jsonify({"articles": articles, "total": len(articles)})
+    finally:
+        conn.close()
+
+
+@bp.route("/control/approve", methods=["POST"])
+def control_approve():
+    """Approve selected pending articles — move to main articles table."""
+    data = request.get_json(force=True)
+    article_ids = data.get("article_ids", [])
+    if not article_ids:
+        return jsonify({"success": False, "error": "No articles selected"}), 400
+    conn = get_conn()
+    try:
+        approved = db.approve_pending_articles(conn, article_ids)
+        return jsonify({"success": True, "approved": approved})
+    finally:
+        conn.close()
+
+
+@bp.route("/control/reject", methods=["POST"])
+def control_reject():
+    """Reject selected pending articles."""
+    data = request.get_json(force=True)
+    article_ids = data.get("article_ids", [])
+    if not article_ids:
+        return jsonify({"success": False, "error": "No articles selected"}), 400
+    conn = get_conn()
+    try:
+        db.reject_pending_articles(conn, article_ids)
+        return jsonify({"success": True, "rejected": len(article_ids)})
+    finally:
+        conn.close()
+
+
+@bp.route("/control/clear-pending", methods=["POST"])
+def control_clear_pending():
+    """Clear resolved pending articles."""
+    conn = get_conn()
+    try:
+        db.clear_pending_articles(conn)
+        return jsonify({"success": True})
+    finally:
+        conn.close()
+
+
+@bp.route("/control/task/<task_id>")
+def control_task_status(task_id):
+    """Poll status of a background task."""
+    with _tasks_lock:
+        task = _tasks.get(task_id)
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+    return jsonify(task)
+
+
+@bp.route("/control/tasks")
+def control_task_list():
+    """List recent background tasks."""
+    with _tasks_lock:
+        tasks = sorted(_tasks.values(), key=lambda t: t["started"], reverse=True)[:20]
+    return jsonify({"tasks": tasks})

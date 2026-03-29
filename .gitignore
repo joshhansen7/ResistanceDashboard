@@ -7,8 +7,9 @@ __pycache__/
 *.pyc
 .venv/
 
-# Data / logs
-wyoming-pulse/data/
+# Data / logs (allow fixtures for seed data)
+wyoming-pulse/data/*
+!wyoming-pulse/data/fixtures/
 wyoming-pulse/logs/
 wyoming-pulse/output/
 

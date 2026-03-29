@@ -61,10 +61,29 @@ CREATE TABLE IF NOT EXISTS feed_runs (
     status TEXT DEFAULT 'success'
 );
 
+CREATE TABLE IF NOT EXISTS pending_articles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    search_id TEXT NOT NULL,
+    source TEXT,
+    title TEXT NOT NULL,
+    url TEXT,
+    published_date TEXT,
+    summary TEXT,
+    matched_keywords TEXT,
+    keyword_score REAL,
+    location_relevance TEXT,
+    relevance_score REAL,
+    relevance_reason TEXT,
+    created_date TEXT NOT NULL,
+    status TEXT DEFAULT 'pending'
+);
+
 CREATE INDEX IF NOT EXISTS idx_articles_analyzed ON articles(analyzed);
 CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published_date);
 CREATE INDEX IF NOT EXISTS idx_articles_source ON articles(source);
 CREATE INDEX IF NOT EXISTS idx_articles_sentiment ON articles(sentiment_label);
+CREATE INDEX IF NOT EXISTS idx_pending_search ON pending_articles(search_id);
+CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_articles(status);
 """
 
 
@@ -287,3 +306,105 @@ def get_status(conn):
     stats["api_usage_estimate"] = f"~{estimated_tokens:,} tokens (~${estimated_cost:.2f})"
 
     return stats
+
+
+# ──────────────────────────────────────────────
+# Pending Articles (Web Search Review Queue)
+# ──────────────────────────────────────────────
+
+def insert_pending_article(conn, article_data):
+    """Insert an article into the pending review queue."""
+    sql = """
+    INSERT INTO pending_articles
+        (search_id, source, title, url, published_date, summary,
+         matched_keywords, keyword_score, location_relevance,
+         relevance_score, relevance_reason, created_date, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    """
+    now = datetime.utcnow().isoformat()
+    params = (
+        article_data["search_id"],
+        article_data.get("source", "Web Search"),
+        article_data["title"],
+        article_data.get("url"),
+        article_data.get("published_date"),
+        article_data.get("summary", ""),
+        json.dumps(article_data.get("matched_keywords", [])),
+        article_data.get("keyword_score", 0.0),
+        article_data.get("location_relevance", "statewide"),
+        article_data.get("relevance_score"),
+        article_data.get("relevance_reason"),
+        now,
+    )
+    cursor = conn.execute(sql, params)
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_pending_articles(conn, search_id=None):
+    """Fetch pending articles, optionally filtered by search_id."""
+    if search_id:
+        rows = conn.execute(
+            "SELECT * FROM pending_articles WHERE search_id = ? AND status = 'pending' "
+            "ORDER BY relevance_score DESC",
+            (search_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM pending_articles WHERE status = 'pending' "
+            "ORDER BY relevance_score DESC"
+        ).fetchall()
+    return rows
+
+
+def approve_pending_articles(conn, article_ids):
+    """Move approved pending articles into the main articles table."""
+    approved = 0
+    for aid in article_ids:
+        row = conn.execute(
+            "SELECT * FROM pending_articles WHERE id = ? AND status = 'pending'",
+            (aid,),
+        ).fetchone()
+        if not row:
+            continue
+
+        article_data = {
+            "source": row["source"],
+            "source_type": "websearch",
+            "title": row["title"],
+            "url": row["url"],
+            "published_date": row["published_date"],
+            "full_text": row["summary"],
+            "summary": row["summary"],
+            "matched_keywords": json.loads(row["matched_keywords"]) if row["matched_keywords"] else [],
+            "keyword_score": row["keyword_score"],
+        }
+        result = insert_article(conn, article_data)
+        if result:
+            approved += 1
+
+        conn.execute(
+            "UPDATE pending_articles SET status = 'approved' WHERE id = ?",
+            (aid,),
+        )
+    conn.commit()
+    return approved
+
+
+def reject_pending_articles(conn, article_ids):
+    """Mark pending articles as rejected."""
+    for aid in article_ids:
+        conn.execute(
+            "UPDATE pending_articles SET status = 'rejected' WHERE id = ?",
+            (aid,),
+        )
+    conn.commit()
+
+
+def clear_pending_articles(conn, search_id=None):
+    """Remove pending articles (optionally by search_id)."""
+    if search_id:
+        conn.execute("DELETE FROM pending_articles WHERE search_id = ?", (search_id,))
+    else:
+        conn.execute("DELETE FROM pending_articles WHERE status != 'pending'")
+    conn.commit()

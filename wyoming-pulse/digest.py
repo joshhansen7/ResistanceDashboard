@@ -5,18 +5,15 @@ Generates biweekly intelligence reports from analyzed articles.
 
 import json
 import logging
-import os
 from collections import Counter
 from datetime import datetime, timedelta
-
-import yaml
 from pathlib import Path
 
 import db
+from shared import load_config, get_api_key
 
 logger = logging.getLogger("wyoming_pulse.digest")
 
-CONFIG_PATH = Path(__file__).parent / "config.yaml"
 OUTPUT_DIR = Path(__file__).parent / "output" / "digests"
 
 SYNTHESIS_PROMPT = """You are an intelligence analyst producing a biweekly sentiment report about data center development in Wyoming for Prometheus Hyperscale leadership.
@@ -33,12 +30,6 @@ The digest should include:
 7. KEY ARTICLES — The 3-5 most significant pieces with source and date
 
 Keep it under 800 words. Write for busy executives who want the bottom line."""
-
-
-def load_config():
-    """Load configuration from config.yaml."""
-    with open(CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f)
 
 
 def compute_stats(articles):
@@ -149,9 +140,9 @@ def build_synthesis_input(articles, stats, days):
 
 def generate_digest_with_api(synthesis_input, days, config):
     """Use Claude Sonnet to generate the digest narrative."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = get_api_key()
     if not api_key:
-        return None, "ANTHROPIC_API_KEY not set"
+        return None, "ANTHROPIC_API_KEY not set and apikey.txt not found"
 
     try:
         import anthropic

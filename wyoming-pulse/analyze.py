@@ -3,19 +3,14 @@ Wyoming Pulse — Sentiment Analysis
 Sends unanalyzed articles to Claude API for sentiment classification.
 """
 
-import json
 import logging
-import os
 import time
 
-import yaml
-from pathlib import Path
-
 import db
+from shared import load_config, get_anthropic_client
+from utils import parse_json_response
 
 logger = logging.getLogger("wyoming_pulse.analyze")
-
-CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 SYSTEM_PROMPT = """You are a sentiment analyst tracking public perception of data center development in Wyoming. You work for Prometheus Hyperscale, which has projects in Evanston and Casper, Wyoming.
 
@@ -45,32 +40,6 @@ Voice types:
 Be precise. A factual news article that quotes both supporters and opponents is neutral (3.0). An editorial urging caution is slightly negative (2.0). A county commissioner's enthusiastic endorsement is strongly positive (5.0)."""
 
 
-def load_config():
-    """Load configuration from config.yaml."""
-    with open(CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f)
-
-
-def get_anthropic_client():
-    """
-    Initialize the Anthropic client.
-    Returns None if the API key is not set.
-    """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        logger.error(
-            "ANTHROPIC_API_KEY not set. Run: export ANTHROPIC_API_KEY='sk-ant-...'"
-        )
-        return None
-
-    try:
-        import anthropic
-        return anthropic.Anthropic(api_key=api_key)
-    except ImportError:
-        logger.error("anthropic package not installed. Run: pip install anthropic")
-        return None
-
-
 def build_user_message(article):
     """Build the user message content for an article."""
     content = article["full_text"] or article["summary"] or ""
@@ -88,20 +57,8 @@ def build_user_message(article):
 
 def parse_analysis_response(response_text):
     """Parse the JSON response from Claude, handling edge cases."""
-    text = response_text.strip()
-
-    # Remove markdown code fences if present
-    if text.startswith("```"):
-        lines = text.split("\n")
-        # Remove first and last lines (fences)
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-
-    try:
-        result = json.loads(text)
-    except json.JSONDecodeError as e:
-        logger.warning("Failed to parse JSON response: %s", e)
-        logger.debug("Raw response: %s", text[:500])
+    result = parse_json_response(response_text)
+    if result is None:
         return None
 
     # Validate required fields

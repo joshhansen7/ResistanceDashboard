@@ -63,12 +63,6 @@ function fmtDate(iso) {
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-function fmtDateFull(iso) {
-    if (!iso) return '--';
-    const d = new Date(iso);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
 function fmtDateTime(iso) {
     if (!iso) return '--';
     const d = new Date(iso);
@@ -136,7 +130,8 @@ function switchPage(name) {
     document.getElementById(`page-${name}`).classList.add('active');
 
     const render = { dashboard: renderDashboard, sentiment: renderSentiment,
-                     articles: () => { articleOffset = 0; renderArticles(); }, system: renderSystem };
+                     articles: () => { articleOffset = 0; renderArticles(); }, system: renderSystem,
+                     control: renderControl };
     if (render[name]) render[name]();
 }
 
@@ -690,6 +685,421 @@ function closeModal(e) { if (e.target === e.currentTarget) e.currentTarget.class
 
 // ── Export ──
 function exportReport() { window.location.href = '/api/export'; }
+
+// ══════════════════════════════════════════════
+//  PAGE 5: CONTROL
+// ══════════════════════════════════════════════
+let _pollTimers = {};
+
+async function renderControl() {
+    // Set default date to today
+    const dateEl = document.getElementById('ctrlDate');
+    if (dateEl && !dateEl.value) {
+        dateEl.value = new Date().toISOString().split('T')[0];
+    }
+
+    // Load recent tasks
+    try {
+        const data = await fetchJSON('/api/control/tasks');
+        const tbody = document.getElementById('taskBody');
+        const noData = document.getElementById('taskNoData');
+
+        if (!data.tasks || data.tasks.length === 0) {
+            tbody.innerHTML = '';
+            noData.style.display = 'block';
+            return;
+        }
+        noData.style.display = 'none';
+
+        tbody.innerHTML = data.tasks.map(t => {
+            const statusCls = t.status === 'completed' ? 'task-complete' :
+                              t.status === 'error' ? 'task-error' : 'task-running';
+            const statusText = t.status === 'completed' ? 'OK' :
+                               t.status === 'error' ? 'ERR' : 'RUN';
+            let dur = '--';
+            if (t.started && t.finished) {
+                const ms = new Date(t.finished) - new Date(t.started);
+                dur = ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(1) + 's';
+            } else if (t.status === 'running') {
+                dur = 'running...';
+            }
+            let resultText = '--';
+            if (t.error) resultText = t.error.substring(0, 80);
+            else if (t.result) resultText = formatTaskResult(t.type, t.result);
+            return `<tr>
+                <td><span class="pill pill-loc">${t.type.toUpperCase()}</span></td>
+                <td><span class="${statusCls}">${statusText}</span></td>
+                <td>${fmtDateTime(t.started)}</td>
+                <td>${dur}</td>
+                <td class="text-cell">${escapeHtml(resultText)}</td>
+            </tr>`;
+        }).join('');
+    } catch (err) { console.error('Control tasks error:', err); }
+}
+
+function formatTaskResult(type, result) {
+    if (!result) return '--';
+    if (typeof result === 'string') return result;
+    switch (type) {
+        case 'ingest':
+            return `Feeds: ${result.feeds_checked || 0} | Entries: ${result.total_entries || 0} | Matches: ${result.keyword_matches || 0} | New: ${result.new_articles || 0}`;
+        case 'websearch':
+            return `Found: ${result.total_results || 0} | New: ${result.new_articles || 0} | URL dupes: ${result.skipped_url || 0} | Title dupes: ${result.skipped_title || 0}`;
+        case 'analysis':
+            return `Analyzed: ${result.analyzed || 0} | Errors: ${result.errors || 0}`;
+        case 'digest':
+            return result.filename || result.message || 'Done';
+        default:
+            return JSON.stringify(result).substring(0, 80);
+    }
+}
+
+async function submitArticle(e) {
+    e.preventDefault();
+    const btn = document.getElementById('btnSubmitArticle');
+    const status = document.getElementById('statusArticle');
+    const title = document.getElementById('ctrlTitle').value.trim();
+
+    if (!title) {
+        status.innerHTML = '<span class="task-error">Title is required</span>';
+        return;
+    }
+
+    btn.disabled = true;
+    btn.classList.add('running');
+    status.innerHTML = '<span class="task-running">Submitting...</span>';
+
+    try {
+        const payload = {
+            source: document.getElementById('ctrlSource').value.trim() || 'Manual Entry',
+            source_type: document.getElementById('ctrlSourceType').value,
+            title: title,
+            url: document.getElementById('ctrlUrl').value.trim(),
+            published_date: document.getElementById('ctrlDate').value,
+            full_text: document.getElementById('ctrlText').value,
+        };
+
+        const resp = await fetch('/api/control/add-article', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+
+        if (data.success) {
+            status.innerHTML = `<span class="task-complete">Article added (ID: ${data.article_id})</span>`;
+            document.getElementById('articleForm').reset();
+            document.getElementById('ctrlDate').value = new Date().toISOString().split('T')[0];
+        } else {
+            status.innerHTML = `<span class="task-error">${escapeHtml(data.error || 'Failed')}</span>`;
+        }
+    } catch (err) {
+        status.innerHTML = `<span class="task-error">Error: ${escapeHtml(err.message)}</span>`;
+    } finally {
+        btn.disabled = false;
+        btn.classList.remove('running');
+    }
+}
+
+const TASK_ENDPOINTS = {
+    ingest: '/api/control/run-ingest',
+    analysis: '/api/control/run-analysis',
+    digest: '/api/control/run-digest',
+};
+
+const TASK_BTN_MAP = {
+    ingest: 'btnIngest',
+    analysis: 'btnAnalysis',
+    digest: 'btnDigest',
+};
+
+async function runTask(type) {
+    const btnId = TASK_BTN_MAP[type];
+    const statusId = 'status' + capitalize(type);
+    const btn = document.getElementById(btnId);
+    const status = document.getElementById(statusId);
+
+    btn.disabled = true;
+    btn.classList.add('running');
+    status.innerHTML = '<span class="task-running">Starting...</span>';
+
+    try {
+        const resp = await fetch(TASK_ENDPOINTS[type], { method: 'POST' });
+        const data = await resp.json();
+
+        if (data.task_id) {
+            pollTask(data.task_id, type, btnId, statusId);
+        } else {
+            status.innerHTML = '<span class="task-error">Failed to start</span>';
+            btn.disabled = false;
+            btn.classList.remove('running');
+        }
+    } catch (err) {
+        status.innerHTML = `<span class="task-error">Error: ${escapeHtml(err.message)}</span>`;
+        btn.disabled = false;
+        btn.classList.remove('running');
+    }
+}
+
+function pollTask(taskId, type, btnId, statusId) {
+    const btn = document.getElementById(btnId);
+    const status = document.getElementById(statusId);
+    let elapsed = 0;
+
+    // Clear any existing poll for this type
+    if (_pollTimers[type]) clearInterval(_pollTimers[type]);
+
+    _pollTimers[type] = setInterval(async () => {
+        elapsed += 2;
+        try {
+            const data = await fetchJSON(`/api/control/task/${taskId}`);
+
+            if (data.status === 'running') {
+                status.innerHTML = `<span class="task-running">Running... (${elapsed}s)</span>`;
+            } else if (data.status === 'completed') {
+                clearInterval(_pollTimers[type]);
+                _pollTimers[type] = null;
+                const resultText = formatTaskResult(type, data.result);
+                status.innerHTML = `<span class="task-complete">${escapeHtml(resultText)}</span>`;
+                btn.disabled = false;
+                btn.classList.remove('running');
+                renderControl(); // Refresh task list
+            } else if (data.status === 'error') {
+                clearInterval(_pollTimers[type]);
+                _pollTimers[type] = null;
+                status.innerHTML = `<span class="task-error">Error: ${escapeHtml(data.error || 'Unknown')}</span>`;
+                btn.disabled = false;
+                btn.classList.remove('running');
+            }
+        } catch (err) {
+            clearInterval(_pollTimers[type]);
+            _pollTimers[type] = null;
+            status.innerHTML = `<span class="task-error">Poll error: ${escapeHtml(err.message)}</span>`;
+            btn.disabled = false;
+            btn.classList.remove('running');
+        }
+    }, 2000);
+}
+
+// ══════════════════════════════════════════════
+//  WEB SEARCH + REVIEW PIPELINE
+// ══════════════════════════════════════════════
+let _currentSearchId = null;
+
+async function runWebSearch() {
+    const btn = document.getElementById('btnWebsearch');
+    const status = document.getElementById('statusWebsearch');
+    const query = document.getElementById('ctrlSearchQuery').value.trim();
+    const daysBack = document.getElementById('ctrlSearchDays').value;
+
+    btn.disabled = true;
+    btn.classList.add('running');
+    status.innerHTML = '<span class="task-running">Searching...</span>';
+    document.getElementById('reviewSection').style.display = 'none';
+
+    try {
+        const resp = await fetch('/api/control/run-websearch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: query || null, days_back: parseInt(daysBack) }),
+        });
+        const data = await resp.json();
+
+        if (data.task_id) {
+            pollWebSearch(data.task_id);
+        } else {
+            status.innerHTML = '<span class="task-error">Failed to start search</span>';
+            btn.disabled = false;
+            btn.classList.remove('running');
+        }
+    } catch (err) {
+        status.innerHTML = `<span class="task-error">Error: ${escapeHtml(err.message)}</span>`;
+        btn.disabled = false;
+        btn.classList.remove('running');
+    }
+}
+
+function pollWebSearch(taskId) {
+    const btn = document.getElementById('btnWebsearch');
+    const status = document.getElementById('statusWebsearch');
+    let elapsed = 0;
+
+    if (_pollTimers.websearch) clearInterval(_pollTimers.websearch);
+
+    _pollTimers.websearch = setInterval(async () => {
+        elapsed += 2;
+        try {
+            const data = await fetchJSON(`/api/control/task/${taskId}`);
+
+            if (data.status === 'running') {
+                status.innerHTML = `<span class="task-running">Searching & scoring... (${elapsed}s)</span>`;
+            } else if (data.status === 'completed') {
+                clearInterval(_pollTimers.websearch);
+                _pollTimers.websearch = null;
+                btn.disabled = false;
+                btn.classList.remove('running');
+
+                const r = data.result || {};
+                let msg = `Found ${r.total_results || 0} results | ${r.new_articles || 0} new`;
+                if (r.skipped_url > 0 || r.skipped_title > 0) {
+                    msg += ` | ${(r.skipped_url || 0) + (r.skipped_title || 0)} duplicates filtered`;
+                }
+                if (r.api_key_set === false && r.new_articles > 0) {
+                    msg += `</span><br><span class="task-warning">ANTHROPIC_API_KEY not set — relevance scoring skipped. Set the key and restart to enable.`;
+                }
+                status.innerHTML = `<span class="task-complete">${msg}</span>`;
+
+                _currentSearchId = r.search_id;
+                if (r.new_articles > 0) {
+                    loadPendingArticles(r.search_id);
+                }
+                renderControl(); // Refresh task list
+            } else if (data.status === 'error') {
+                clearInterval(_pollTimers.websearch);
+                _pollTimers.websearch = null;
+                status.innerHTML = `<span class="task-error">Error: ${escapeHtml(data.error || 'Unknown')}</span>`;
+                btn.disabled = false;
+                btn.classList.remove('running');
+            }
+        } catch (err) {
+            clearInterval(_pollTimers.websearch);
+            _pollTimers.websearch = null;
+            status.innerHTML = `<span class="task-error">Poll error: ${escapeHtml(err.message)}</span>`;
+            btn.disabled = false;
+            btn.classList.remove('running');
+        }
+    }, 2000);
+}
+
+async function loadPendingArticles(searchId) {
+    const section = document.getElementById('reviewSection');
+    const tbody = document.getElementById('reviewBody');
+
+    try {
+        let url = '/api/control/pending';
+        if (searchId) url += `?search_id=${searchId}`;
+        const data = await fetchJSON(url);
+
+        if (!data.articles || data.articles.length === 0) {
+            section.style.display = 'none';
+            return;
+        }
+
+        section.style.display = 'block';
+        document.getElementById('reviewCount').textContent = data.articles.length;
+        document.getElementById('selectAll').checked = true;
+
+        tbody.innerHTML = data.articles.map(a => {
+            const hasScore = a.relevance_score !== null && a.relevance_score !== undefined;
+            const scoreCls = !hasScore ? 'rel-none' :
+                             a.relevance_score >= 8 ? 'rel-high' :
+                             a.relevance_score >= 5 ? 'rel-mid' : 'rel-low';
+            const scoreText = hasScore ? a.relevance_score : '—';
+            const titleTrunc = a.title && a.title.length > 60 ? a.title.substring(0, 57) + '...' : (a.title || '--');
+            const reason = a.relevance_reason || (hasScore ? '' : 'Not scored');
+            const reasonTrunc = reason.length > 50 ? reason.substring(0, 47) + '...' : reason;
+            const summary = a.summary ? escapeHtml(a.summary) : '<span style="color:var(--text-muted)">No summary available</span>';
+            return `<tr data-id="${a.id}" style="cursor:pointer" onclick="togglePendingExpand(${a.id}, event)">
+                <td><input type="checkbox" class="pending-check" data-id="${a.id}" checked onchange="updateSelectedCount()"></td>
+                <td><span class="relevance-score ${scoreCls}">${scoreText}</span></td>
+                <td class="text-cell" title="${escapeHtml(a.title)}"><a href="${escapeHtml(a.url || '#')}" target="_blank" rel="noopener" class="article-link">${escapeHtml(titleTrunc)}</a></td>
+                <td>${escapeHtml(a.source || '')}</td>
+                <td>${fmtDate(a.published_date)}</td>
+                <td class="text-cell" title="${escapeHtml(reason)}">${escapeHtml(reasonTrunc)}</td>
+            </tr>
+            <tr class="expand-row hidden" id="pending-expand-${a.id}">
+                <td colspan="6" class="pending-detail">
+                    <div class="pending-detail-reason"><strong>Relevance:</strong> ${escapeHtml(reason)}</div>
+                    <div class="pending-detail-summary">${summary}</div>
+                    ${a.url ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" class="article-link" style="font-size:10px;word-break:break-all">${escapeHtml(a.url)}</a>` : ''}
+                </td>
+            </tr>`;
+        }).join('');
+
+        updateSelectedCount();
+    } catch (err) {
+        console.error('Load pending error:', err);
+    }
+}
+
+function togglePendingExpand(id, event) {
+    // Don't toggle when clicking checkbox or link
+    if (event.target.closest('input, a')) return;
+    const row = document.getElementById(`pending-expand-${id}`);
+    if (row) row.classList.toggle('hidden');
+}
+
+function toggleAllPending(checked) {
+    document.querySelectorAll('.pending-check').forEach(cb => { cb.checked = checked; });
+    updateSelectedCount();
+}
+
+function updateSelectedCount() {
+    const checked = document.querySelectorAll('.pending-check:checked').length;
+    document.getElementById('reviewSelected').textContent = checked;
+}
+
+function _getCheckedIds() {
+    return Array.from(document.querySelectorAll('.pending-check:checked')).map(cb => parseInt(cb.dataset.id));
+}
+
+function _getUncheckedIds() {
+    return Array.from(document.querySelectorAll('.pending-check:not(:checked)')).map(cb => parseInt(cb.dataset.id));
+}
+
+async function approveSelected() {
+    const ids = _getCheckedIds();
+    if (ids.length === 0) return;
+
+    try {
+        const resp = await fetch('/api/control/approve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ article_ids: ids }),
+        });
+        const data = await resp.json();
+
+        if (data.success) {
+            const statusEl = document.getElementById('statusWebsearch');
+            statusEl.innerHTML = `<span class="task-complete">Approved ${data.approved} articles into database</span>`;
+
+            // Reject any unchecked ones
+            const unchecked = _getUncheckedIds();
+            if (unchecked.length > 0) {
+                await fetch('/api/control/reject', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ article_ids: unchecked }),
+                });
+            }
+
+            document.getElementById('reviewSection').style.display = 'none';
+            renderControl();
+        }
+    } catch (err) {
+        console.error('Approve error:', err);
+    }
+}
+
+async function rejectSelected() {
+    const unchecked = _getUncheckedIds();
+    if (unchecked.length === 0) return;
+
+    try {
+        await fetch('/api/control/reject', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ article_ids: unchecked }),
+        });
+
+        // Reload to show only remaining
+        if (_currentSearchId) {
+            loadPendingArticles(_currentSearchId);
+        }
+    } catch (err) {
+        console.error('Reject error:', err);
+    }
+}
 
 // ── Init ──
 document.addEventListener('DOMContentLoaded', () => { renderDashboard(); });
