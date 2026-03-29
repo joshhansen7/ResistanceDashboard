@@ -293,6 +293,8 @@ body::after {
     grid-column: 1;
     position: relative;
     min-height: 360px;
+    display: flex;
+    flex-direction: column;
 }
 
 .metrics-panel {
@@ -308,12 +310,22 @@ body::after {
 /* ═══ MAP ═══ */
 #wyomingMap {
     width: 100%;
-    height: 330px;
+    flex: 1;
+    min-height: 300px;
 }
 
 #wyomingMap svg {
     width: 100%;
     height: 100%;
+}
+
+.state-path {
+    transition: fill 0.2s, opacity 0.15s;
+}
+.state-path:hover {
+    opacity: 0.85;
+    stroke: var(--accent-teal) !important;
+    stroke-width: 1 !important;
 }
 
 .county-path {
@@ -327,6 +339,28 @@ body::after {
 .county-path:hover {
     stroke: var(--accent-teal);
     stroke-width: 1;
+}
+
+.map-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.map-back-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 2px 4px;
+    display: flex;
+    align-items: center;
+    border-radius: 2px;
+    transition: border-color 0.15s, color 0.15s;
+}
+.map-back-btn:hover {
+    border-color: var(--accent-teal);
+    color: var(--accent-teal);
 }
 
 .map-marker-dot {

@@ -175,18 +175,49 @@ def voice_comparison():
 
 
 # ──────────────────────────────────────────────
+# /api/state-sentiment
+# ──────────────────────────────────────────────
+@bp.route("/state-sentiment")
+def state_sentiment():
+    """Per-state average sentiment for the US map."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT state, AVG(sentiment_score) as avg, COUNT(*) as count "
+            "FROM articles WHERE analyzed = 1 AND state IS NOT NULL "
+            "GROUP BY state"
+        ).fetchall()
+        result = {}
+        for r in rows:
+            if r["state"] and r["state"] not in ("nationwide", "other"):
+                result[r["state"]] = {
+                    "avg": round(r["avg"], 2) if r["avg"] else None,
+                    "count": r["count"],
+                }
+        return jsonify(result)
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────
 # /api/locations
 # ──────────────────────────────────────────────
 @bp.route("/locations")
 def locations():
     conn = get_conn()
     try:
+        state = request.args.get("state", "wyoming")
+        state_locations = {
+            "wyoming": ["evanston", "casper", "cheyenne", "statewide"],
+            "texas": ["dallas", "statewide"],
+        }
+        locs = state_locations.get(state, ["statewide"])
         result = {}
-        for loc in ("evanston", "casper", "cheyenne", "statewide"):
+        for loc in locs:
             row = conn.execute(
                 "SELECT AVG(sentiment_score) as avg, COUNT(*) as count "
-                "FROM articles WHERE analyzed = 1 AND location_relevance = ?",
-                (loc,),
+                "FROM articles WHERE analyzed = 1 AND state = ? AND location_relevance = ?",
+                (state, loc),
             ).fetchone()
             result[loc] = {
                 "avg": round(row["avg"], 2) if row["avg"] else None,

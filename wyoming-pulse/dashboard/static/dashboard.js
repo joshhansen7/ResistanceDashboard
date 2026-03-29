@@ -7,7 +7,10 @@ let currentPage = 'dashboard';
 let articleOffset = 0;
 let articleTotal = 0;
 let articleCache = {};  // id -> article data for detail panel
-let mapRendered = false;
+let mapView = 'none';        // 'none' | 'us' | 'county'
+let mapActiveState = null;    // 'wyoming' | 'texas' | null
+let mapTopoData = null;       // cached TopoJSON
+let mapStateSentiment = {};   // cached state-level sentiment
 
 // ── Chart.js Defaults ──
 Chart.defaults.color = '#6b7280';
@@ -137,71 +140,63 @@ function switchPage(name) {
 }
 
 // ══════════════════════════════════════════════
-//  D3.js WYOMING MAP
+//  D3.js MAP — US overview + state drill-down
 // ══════════════════════════════════════════════
-const WYOMING_FIPS = '56';
-const CITY_COORDS = {
-    evanston:  [-110.9632, 41.2683],
-    casper:    [-106.3131, 42.8666],
-    cheyenne:  [-104.8202, 41.1400],
-};
-const COUNTY_FIPS_MAP = {
-    '56001': 'Albany',
-    '56003': 'Big Horn',
-    '56005': 'Campbell',
-    '56007': 'Carbon',
-    '56009': 'Converse',
-    '56011': 'Crook',
-    '56013': 'Fremont',
-    '56015': 'Goshen',
-    '56017': 'Hot Springs',
-    '56019': 'Johnson',
-    '56021': 'Laramie',
-    '56023': 'Lincoln',
-    '56025': 'Natrona',
-    '56027': 'Niobrara',
-    '56029': 'Park',
-    '56031': 'Platte',
-    '56033': 'Sheridan',
-    '56035': 'Sublette',
-    '56037': 'Sweetwater',
-    '56039': 'Teton',
-    '56041': 'Uinta',
-    '56043': 'Washakie',
-    '56045': 'Weston',
+const STATE_CONFIG = {
+    wyoming: {
+        fips: '56',
+        name: 'Wyoming',
+        cities: {
+            evanston:  [-110.9632, 41.2683],
+            casper:    [-106.3131, 42.8666],
+            cheyenne:  [-104.8202, 41.1400],
+        },
+        cityCountyFips: { evanston: '56041', casper: '56025', cheyenne: '56021' },
+    },
+    texas: {
+        fips: '48',
+        name: 'Texas',
+        cities: {
+            dallas: [-96.7970, 32.7767],
+        },
+        cityCountyFips: { dallas: '48113' },
+    },
 };
 
-async function renderMap(locations) {
+const STATE_NAME_TO_KEY = {
+    'Wyoming': 'wyoming',
+    'Texas': 'texas',
+};
+
+// ── Tooltip positioning helper ──
+function positionTooltip(event, container) {
+    const tooltip = document.getElementById('mapTooltip');
+    const rect = container.getBoundingClientRect();
+    tooltip.style.left = (event.clientX - rect.left + 10) + 'px';
+    tooltip.style.top = (event.clientY - rect.top - 10) + 'px';
+}
+
+// ── Ensure TopoJSON is loaded (cached) ──
+async function ensureTopoData() {
+    if (!mapTopoData) {
+        mapTopoData = await d3.json('https://cdn.jsdelivr.net/npm/us-atlas@3/counties-10m.json');
+    }
+    return mapTopoData;
+}
+
+// ── US Map (default view) ──
+async function renderUSMap(stateSentiment) {
     const container = document.getElementById('wyomingMap');
     if (!container) return;
-
-    // Only build map once, then update colors
-    if (mapRendered) {
-        updateMapColors(locations);
-        return;
-    }
+    container.innerHTML = '';
 
     try {
-        // Fetch US counties TopoJSON
-        const us = await d3.json('https://cdn.jsdelivr.net/npm/us-atlas@3/counties-10m.json');
-        const counties = topojson.feature(us, us.objects.counties);
+        const us = await ensureTopoData();
         const states = topojson.feature(us, us.objects.states);
 
-        // Filter to Wyoming
-        const wyCounties = {
-            type: 'FeatureCollection',
-            features: counties.features.filter(f => String(f.id).startsWith(WYOMING_FIPS))
-        };
-        const wyState = {
-            type: 'FeatureCollection',
-            features: states.features.filter(f => String(f.id) === WYOMING_FIPS)
-        };
-
         const width = container.clientWidth;
-        const height = 330;
-
-        // Projection fitted to Wyoming
-        const projection = d3.geoAlbersUsa().fitSize([width, height], wyState);
+        const height = container.clientHeight || 330;
+        const projection = d3.geoAlbersUsa().fitSize([width, height], states);
         const path = d3.geoPath().projection(projection);
 
         const svg = d3.select(container)
@@ -209,9 +204,123 @@ async function renderMap(locations) {
             .attr('width', width)
             .attr('height', height);
 
+        svg.selectAll('.state-path')
+            .data(states.features)
+            .enter()
+            .append('path')
+            .attr('class', 'state-path')
+            .attr('d', path)
+            .attr('data-state-name', d => d.properties.name)
+            .attr('fill', d => {
+                const key = STATE_NAME_TO_KEY[d.properties.name];
+                if (key && stateSentiment[key] && stateSentiment[key].avg !== null) {
+                    return sentimentColor(stateSentiment[key].avg);
+                }
+                return '#0f1520';
+            })
+            .attr('stroke', d => {
+                const key = STATE_NAME_TO_KEY[d.properties.name];
+                return (key && stateSentiment[key]) ? '#14b8a6' : 'rgba(148,163,184,0.2)';
+            })
+            .attr('stroke-width', d => {
+                const key = STATE_NAME_TO_KEY[d.properties.name];
+                return (key && stateSentiment[key]) ? 0.8 : 0.3;
+            })
+            .attr('cursor', 'pointer')
+            .on('mouseenter', function(event, d) {
+                const tooltip = document.getElementById('mapTooltip');
+                const key = STATE_NAME_TO_KEY[d.properties.name];
+                if (key && stateSentiment[key] && stateSentiment[key].avg !== null) {
+                    const s = stateSentiment[key];
+                    tooltip.textContent = `${d.properties.name} | avg: ${s.avg.toFixed(1)} | n=${s.count}`;
+                } else {
+                    tooltip.textContent = d.properties.name;
+                }
+                tooltip.classList.add('visible');
+            })
+            .on('mousemove', function(event) { positionTooltip(event, container); })
+            .on('mouseleave', function() {
+                document.getElementById('mapTooltip').classList.remove('visible');
+            })
+            .on('click', function(event, d) {
+                const key = STATE_NAME_TO_KEY[d.properties.name];
+                if (key && STATE_CONFIG[key]) {
+                    drillIntoState(key);
+                } else {
+                    const tooltip = document.getElementById('mapTooltip');
+                    tooltip.textContent = `${d.properties.name} — No data yet`;
+                    tooltip.classList.add('visible');
+                    setTimeout(() => tooltip.classList.remove('visible'), 1500);
+                }
+            });
+
+        mapView = 'us';
+        mapActiveState = null;
+        mapStateSentiment = stateSentiment;
+        document.getElementById('mapTitle').textContent = 'United States';
+        document.getElementById('mapBackBtn').style.display = 'none';
+
+    } catch (err) {
+        console.error('US map render error:', err);
+        container.innerHTML = '<div class="no-data">Map unavailable</div>';
+    }
+}
+
+// ── State drill-down (county view) ──
+async function drillIntoState(stateKey) {
+    const config = STATE_CONFIG[stateKey];
+    if (!config) return;
+
+    const container = document.getElementById('wyomingMap');
+    container.innerHTML = '';
+
+    try {
+        const us = await ensureTopoData();
+        const counties = topojson.feature(us, us.objects.counties);
+        const statesGeo = topojson.feature(us, us.objects.states);
+
+        const stateCounties = {
+            type: 'FeatureCollection',
+            features: counties.features.filter(f => String(f.id).startsWith(config.fips))
+        };
+        const stateOutline = {
+            type: 'FeatureCollection',
+            features: statesGeo.features.filter(f => String(f.id) === config.fips)
+        };
+
+        const width = container.clientWidth;
+        const height = container.clientHeight || 330;
+        const projection = d3.geoAlbersUsa().fitSize([width, height], stateOutline);
+        const path = d3.geoPath().projection(projection);
+
+        const svg = d3.select(container)
+            .append('svg')
+            .attr('width', width)
+            .attr('height', height);
+
+        // Neighboring state outlines (rendered first, behind counties)
+        const neighborStates = statesGeo.features.filter(f => String(f.id) !== config.fips);
+        svg.selectAll('.neighbor-state')
+            .data(neighborStates)
+            .enter()
+            .append('path')
+            .attr('class', 'neighbor-state')
+            .attr('d', path)
+            .attr('fill', '#0a0e17')
+            .attr('stroke', 'rgba(148,163,184,0.15)')
+            .attr('stroke-width', 0.5);
+
+        // Fetch location sentiment for this state
+        const locations = await fetchJSON(`/api/locations?state=${stateKey}`);
+        const cityFips = config.cityCountyFips;
+
+        // Reverse lookup: FIPS -> city key
+        const fipsToCityKey = {};
+        Object.entries(cityFips).forEach(([city, fips]) => { fipsToCityKey[fips] = city; });
+
         // Draw counties
         svg.selectAll('.county-path')
-            .data(wyCounties.features)
+            .data(stateCounties.features)
             .enter()
             .append('path')
             .attr('class', 'county-path')
@@ -219,59 +328,49 @@ async function renderMap(locations) {
             .attr('data-fips', d => d.id)
             .on('mouseenter', function(event, d) {
                 const fips = String(d.id);
-                const countyName = COUNTY_FIPS_MAP[fips];
+                const countyName = (d.properties && d.properties.name) ? d.properties.name : `FIPS ${fips}`;
                 const tooltip = document.getElementById('mapTooltip');
-                if (countyName) {
-                    const locKey = Object.keys(CITY_COORDS).find(k => {
-                        const cn = countyName.toLowerCase();
-                        if (cn === 'uinta') return k === 'evanston';
-                        if (cn === 'natrona') return k === 'casper';
-                        if (cn === 'laramie') return k === 'cheyenne';
-                        return false;
-                    });
-                    if (locKey && locations[locKey]) {
-                        const avg = locations[locKey].avg;
-                        tooltip.textContent = `${countyName} Co. | avg: ${avg !== null ? avg.toFixed(1) : 'n/a'} | n=${locations[locKey].count}`;
-                    } else {
-                        tooltip.textContent = `${countyName} Co.`;
-                    }
+                const cityKey = fipsToCityKey[fips];
+                if (cityKey && locations[cityKey] && locations[cityKey].avg !== null) {
+                    tooltip.textContent = `${countyName} Co. | avg: ${locations[cityKey].avg.toFixed(1)} | n=${locations[cityKey].count}`;
                 } else {
-                    tooltip.textContent = `FIPS ${fips}`;
+                    tooltip.textContent = `${countyName} Co.`;
                 }
                 tooltip.classList.add('visible');
             })
-            .on('mousemove', function(event) {
-                const tooltip = document.getElementById('mapTooltip');
-                const rect = container.getBoundingClientRect();
-                tooltip.style.left = (event.clientX - rect.left + 10) + 'px';
-                tooltip.style.top = (event.clientY - rect.top - 10) + 'px';
-            })
+            .on('mousemove', function(event) { positionTooltip(event, container); })
             .on('mouseleave', function() {
                 document.getElementById('mapTooltip').classList.remove('visible');
             });
 
+        // Color counties with city data
+        Object.entries(cityFips).forEach(([loc, fips]) => {
+            const el = document.querySelector(`.county-path[data-fips="${fips}"]`);
+            if (el && locations[loc] && locations[loc].avg !== null) {
+                el.style.fill = sentimentColor(locations[loc].avg);
+                el.style.stroke = '#14b8a6';
+                el.style.strokeWidth = '0.8';
+            }
+        });
+
         // State outline
-        svg.append('path')
-            .datum(wyState.features[0])
-            .attr('d', path)
-            .attr('fill', 'none')
-            .attr('stroke', '#14b8a6')
-            .attr('stroke-width', 1)
-            .attr('stroke-opacity', 0.3);
+        if (stateOutline.features[0]) {
+            svg.append('path')
+                .datum(stateOutline.features[0])
+                .attr('d', path)
+                .attr('fill', 'none')
+                .attr('stroke', '#14b8a6')
+                .attr('stroke-width', 1)
+                .attr('stroke-opacity', 0.3);
+        }
 
         // City markers
-        Object.entries(CITY_COORDS).forEach(([city, coords]) => {
-            const [x, y] = projection(coords);
-            if (x && y) {
-                // Pulse ring
-                svg.append('circle')
-                    .attr('cx', x).attr('cy', y).attr('r', 3)
-                    .attr('class', 'map-marker-pulse');
-                // Dot
-                svg.append('circle')
-                    .attr('cx', x).attr('cy', y).attr('r', 3)
-                    .attr('class', 'map-marker-dot');
-                // Label
+        Object.entries(config.cities).forEach(([city, coords]) => {
+            const projected = projection(coords);
+            if (projected) {
+                const [x, y] = projected;
+                svg.append('circle').attr('cx', x).attr('cy', y).attr('r', 3).attr('class', 'map-marker-pulse');
+                svg.append('circle').attr('cx', x).attr('cy', y).attr('r', 3).attr('class', 'map-marker-dot');
                 svg.append('text')
                     .attr('x', x + 8).attr('y', y + 4)
                     .attr('fill', '#e2e8f0')
@@ -283,25 +382,23 @@ async function renderMap(locations) {
             }
         });
 
-        mapRendered = true;
-        updateMapColors(locations);
+        mapView = 'county';
+        mapActiveState = stateKey;
+        document.getElementById('mapTitle').textContent = `${config.name} Counties`;
+        document.getElementById('mapBackBtn').style.display = '';
 
     } catch (err) {
-        console.error('Map render error:', err);
+        console.error('State map render error:', err);
         container.innerHTML = '<div class="no-data">Map unavailable</div>';
     }
 }
 
-function updateMapColors(locations) {
-    const locToFips = { evanston: '56041', casper: '56025', cheyenne: '56021' };
-    Object.entries(locToFips).forEach(([loc, fips]) => {
-        const el = document.querySelector(`.county-path[data-fips="${fips}"]`);
-        if (el && locations[loc] && locations[loc].avg !== null) {
-            el.style.fill = sentimentColor(locations[loc].avg);
-            el.style.stroke = '#14b8a6';
-            el.style.strokeWidth = '0.8';
-        }
-    });
+// ── Back to US map ──
+async function showUSMap() {
+    if (!mapStateSentiment || Object.keys(mapStateSentiment).length === 0) {
+        mapStateSentiment = await fetchJSON('/api/state-sentiment');
+    }
+    renderUSMap(mapStateSentiment);
 }
 
 // ══════════════════════════════════════════════
@@ -309,11 +406,11 @@ function updateMapColors(locations) {
 // ══════════════════════════════════════════════
 async function renderDashboard() {
     try {
-        const [overview, trend, voice, locations] = await Promise.all([
+        const [overview, trend, voice, stateSentiment] = await Promise.all([
             fetchJSON('/api/overview'),
             fetchJSON('/api/sentiment-trend'),
             fetchJSON('/api/voice-comparison'),
-            fetchJSON('/api/locations'),
+            fetchJSON('/api/state-sentiment'),
         ]);
 
         // Metrics
@@ -341,8 +438,10 @@ async function renderDashboard() {
         // Sync
         document.getElementById('lastSync').textContent = overview.last_ingestion ? timeAgo(overview.last_ingestion) : '--';
 
-        // Map
-        renderMap(locations);
+        // Map — default to US view, but don't reset if user drilled into a state
+        if (mapView === 'none' || mapView === 'us') {
+            renderUSMap(stateSentiment);
+        }
 
         // Charts
         renderTrendChart(trend.data);
