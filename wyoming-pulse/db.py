@@ -33,10 +33,12 @@ CREATE TABLE IF NOT EXISTS articles (
     sentiment_score REAL,
     sentiment_label TEXT,
     voice_type TEXT,
+    state TEXT,
     location_relevance TEXT,
     topic_tags TEXT,
     entities_mentioned TEXT,
     key_claims TEXT,
+    sentiment_justification TEXT,
     analysis_raw TEXT,
     included_in_digest TEXT
 );
@@ -101,6 +103,16 @@ def init_db(db_path=None):
     conn = get_connection(db_path)
     try:
         conn.executescript(SCHEMA_SQL)
+        # Migrate: add sentiment_justification column if missing
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()]
+        if "sentiment_justification" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN sentiment_justification TEXT")
+            logger.info("Migrated: added sentiment_justification column")
+        if "state" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN state TEXT")
+            conn.execute("UPDATE articles SET state = 'wyoming' WHERE state IS NULL")
+            logger.info("Migrated: added state column, defaulted existing records to wyoming")
+        conn.commit()
         conn.commit()
         logger.info("Database initialized at %s", db_path or DB_PATH)
     finally:
@@ -160,10 +172,12 @@ def update_article_analysis(conn, article_id, analysis):
         sentiment_score = ?,
         sentiment_label = ?,
         voice_type = ?,
+        state = ?,
         location_relevance = ?,
         topic_tags = ?,
         entities_mentioned = ?,
         key_claims = ?,
+        sentiment_justification = ?,
         analysis_raw = ?
     WHERE id = ?
     """
@@ -173,10 +187,12 @@ def update_article_analysis(conn, article_id, analysis):
         analysis.get("sentiment_score"),
         analysis.get("sentiment_label"),
         analysis.get("voice_type"),
+        analysis.get("state"),
         analysis.get("location_relevance"),
         json.dumps(analysis.get("topic_tags", [])),
         json.dumps(analysis.get("entities_mentioned", [])),
         analysis.get("key_claims"),
+        analysis.get("sentiment_justification"),
         json.dumps(analysis),
         article_id,
     )

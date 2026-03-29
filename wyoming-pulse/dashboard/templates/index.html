@@ -152,12 +152,24 @@
         </div>
         <div class="page-content">
             <div class="filter-bar">
+                <select id="filterState" onchange="onStateFilterChange()">
+                    <option value="">All States</option>
+                    <option value="wyoming">Wyoming</option>
+                    <option value="texas">Texas</option>
+                    <option value="nationwide">Nationwide</option>
+                </select>
                 <select id="filterLocation" onchange="renderArticles()">
-                    <option value="">All Locations</option>
-                    <option value="evanston">Evanston</option>
-                    <option value="casper">Casper</option>
-                    <option value="cheyenne">Cheyenne</option>
-                    <option value="statewide">Statewide</option>
+                    <option value="">All Regions</option>
+                    <optgroup id="filterLocWY" label="Wyoming">
+                        <option value="statewide" data-state="wyoming">Statewide</option>
+                        <option value="evanston" data-state="wyoming">Evanston</option>
+                        <option value="casper" data-state="wyoming">Casper</option>
+                        <option value="cheyenne" data-state="wyoming">Cheyenne</option>
+                    </optgroup>
+                    <optgroup id="filterLocTX" label="Texas">
+                        <option value="statewide" data-state="texas">TX Statewide</option>
+                        <option value="dallas" data-state="texas">Dallas</option>
+                    </optgroup>
                 </select>
                 <select id="filterSentiment" onchange="renderArticles()">
                     <option value="">All Sentiments</option>
@@ -176,7 +188,8 @@
                             <th>Source</th>
                             <th>Date</th>
                             <th>Sentiment</th>
-                            <th>Location</th>
+                            <th>State</th>
+                            <th>Region</th>
                             <th>Voice</th>
                         </tr>
                     </thead>

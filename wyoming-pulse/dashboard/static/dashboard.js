@@ -6,6 +6,7 @@ let charts = {};
 let currentPage = 'dashboard';
 let articleOffset = 0;
 let articleTotal = 0;
+let articleCache = {};  // id -> article data for detail panel
 let mapRendered = false;
 
 // ── Chart.js Defaults ──
@@ -547,12 +548,43 @@ async function renderDistribution() {
 // ══════════════════════════════════════════════
 //  PAGE 3: ARTICLES (table with expandable rows)
 // ══════════════════════════════════════════════
+const STATE_ABBR = { wyoming: 'WY', texas: 'TX', nationwide: 'US', other: '??' };
+const STATE_REGIONS = {
+    wyoming: ['statewide', 'evanston', 'casper', 'cheyenne'],
+    texas: ['statewide', 'dallas'],
+    nationwide: [],
+};
+
+function onStateFilterChange() {
+    const state = document.getElementById('filterState').value;
+    const locSelect = document.getElementById('filterLocation');
+    const wyGroup = document.getElementById('filterLocWY');
+    const txGroup = document.getElementById('filterLocTX');
+    locSelect.value = '';
+    if (!state) {
+        wyGroup.style.display = '';
+        txGroup.style.display = '';
+        locSelect.disabled = false;
+    } else if (state === 'nationwide') {
+        wyGroup.style.display = 'none';
+        txGroup.style.display = 'none';
+        locSelect.disabled = true;
+    } else {
+        wyGroup.style.display = state === 'wyoming' ? '' : 'none';
+        txGroup.style.display = state === 'texas' ? '' : 'none';
+        locSelect.disabled = false;
+    }
+    renderArticles();
+}
+
 async function renderArticles(append = false) {
     if (!append) articleOffset = 0;
 
+    const state = document.getElementById('filterState').value;
     const loc = document.getElementById('filterLocation').value;
     const sent = document.getElementById('filterSentiment').value;
     let url = `/api/articles?limit=25&offset=${articleOffset}`;
+    if (state) url += `&state=${state}`;
     if (loc) url += `&location=${loc}`;
     if (sent) url += `&sentiment_label=${sent}`;
 
@@ -574,20 +606,90 @@ async function renderArticles(append = false) {
 
         const rows = data.articles.map((a, i) => {
             const idx = articleOffset + i;
+            articleCache[a.id] = a;
             const titleTrunc = a.title && a.title.length > 70 ? a.title.substring(0, 67) + '...' : (a.title || '--');
+            const topics = (a.topic_tags || []).map(t => `<span class="pill pill-topic">${topicDisplay(t)}</span>`).join(' ');
+            const entities = (a.entities_mentioned || []).map(e => `<span class="pill pill-entity">${escapeHtml(e)}</span>`).join(' ');
             return `
                 <tr style="cursor:pointer" onclick="toggleExpand(${idx})">
                     <td class="text-cell">${escapeHtml(titleTrunc)}</td>
                     <td>${escapeHtml(a.source || '')}</td>
                     <td>${fmtDate(a.published_date)}</td>
                     <td><span class="pill ${sentimentPillClass(a.sentiment_label)}">${sentimentLabel(a.sentiment_label)}</span></td>
+                    <td><span class="pill pill-state">${STATE_ABBR[a.state] || (a.state ? a.state.toUpperCase() : '--')}</span></td>
                     <td><span class="pill pill-loc">${capitalize(a.location_relevance || '')}</span></td>
                     <td><span class="pill pill-${a.voice_type}">${(a.voice_type || '').toUpperCase()}</span></td>
                 </tr>
                 <tr class="expand-row hidden" id="expand-${idx}">
-                    <td colspan="6">
-                        ${a.url ? `<a href="${a.url}" target="_blank" rel="noopener" style="color:var(--accent-teal);font-family:var(--font-data);font-size:10px">${escapeHtml(a.url)}</a><br><br>` : ''}
-                        ${a.key_claims ? escapeHtml(a.key_claims) : '<span style="color:var(--text-muted)">No claims extracted</span>'}
+                    <td colspan="7">
+                        <div class="article-detail" data-article-id="${a.id}">
+                            ${a.url ? `<a href="${a.url}" target="_blank" rel="noopener" class="article-detail-url">${escapeHtml(a.url)}</a>` : ''}
+                            <div class="article-detail-grid">
+                                <div class="article-detail-section">
+                                    <div class="article-detail-label">SENTIMENT</div>
+                                    <div class="article-detail-field">
+                                        <select class="detail-select" data-field="sentiment_label" onchange="markArticleDirty(this)">
+                                            <option value="strongly_positive" ${a.sentiment_label==='strongly_positive'?'selected':''}>V. Positive</option>
+                                            <option value="slightly_positive" ${a.sentiment_label==='slightly_positive'?'selected':''}>Positive</option>
+                                            <option value="neutral" ${a.sentiment_label==='neutral'?'selected':''}>Neutral</option>
+                                            <option value="slightly_negative" ${a.sentiment_label==='slightly_negative'?'selected':''}>Negative</option>
+                                            <option value="strongly_negative" ${a.sentiment_label==='strongly_negative'?'selected':''}>V. Negative</option>
+                                        </select>
+                                        <span class="detail-score">${a.sentiment_score != null ? a.sentiment_score.toFixed(1) : '--'} / 5</span>
+                                    </div>
+                                </div>
+                                <div class="article-detail-section">
+                                    <div class="article-detail-label">STATE</div>
+                                    <div class="article-detail-field">
+                                        <select class="detail-select" data-field="state" onchange="onDetailStateChange(this); markArticleDirty(this)">
+                                            <option value="wyoming" ${a.state==='wyoming'?'selected':''}>Wyoming</option>
+                                            <option value="texas" ${a.state==='texas'?'selected':''}>Texas</option>
+                                            <option value="nationwide" ${a.state==='nationwide'?'selected':''}>Nationwide</option>
+                                            <option value="other" ${a.state==='other'?'selected':''}>Other</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="article-detail-section">
+                                    <div class="article-detail-label">REGION</div>
+                                    <div class="article-detail-field">
+                                        <select class="detail-select detail-region-select" data-field="location_relevance" onchange="markArticleDirty(this)">
+                                            ${regionOptions(a.state, a.location_relevance)}
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="article-detail-section">
+                                    <div class="article-detail-label">VOICE</div>
+                                    <div class="article-detail-field">
+                                        <select class="detail-select" data-field="voice_type" onchange="markArticleDirty(this)">
+                                            <option value="elite" ${a.voice_type==='elite'?'selected':''}>Elite</option>
+                                            <option value="public" ${a.voice_type==='public'?'selected':''}>Public</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="article-detail-section">
+                                    <div class="article-detail-label">SOURCE TYPE</div>
+                                    <div class="article-detail-value">${capitalize(a.source_type || 'news')}</div>
+                                </div>
+                            </div>
+                            <div class="article-detail-section">
+                                <div class="article-detail-label">TOPICS</div>
+                                <div class="article-detail-tags">${topics || '<span class="detail-empty">No topics</span>'}</div>
+                            </div>
+                            <div class="article-detail-section">
+                                <div class="article-detail-label">ENTITIES</div>
+                                <div class="article-detail-tags">${entities || '<span class="detail-empty">None detected</span>'}</div>
+                            </div>
+                            <div class="article-detail-section">
+                                <div class="article-detail-label">KEY CLAIMS</div>
+                                <div class="article-detail-claims">${a.key_claims ? escapeHtml(a.key_claims) : '<span class="detail-empty">No claims extracted</span>'}</div>
+                            </div>
+                            ${a.sentiment_justification ? `<div class="article-detail-section"><div class="article-detail-label">SCORING RATIONALE</div><div class="article-detail-claims article-detail-rationale">${escapeHtml(a.sentiment_justification)}</div></div>` : ''}
+                            ${a.summary ? `<div class="article-detail-section"><div class="article-detail-label">SUMMARY</div><div class="article-detail-claims">${escapeHtml(a.summary)}</div></div>` : ''}
+                            <div class="article-detail-actions">
+                                <button class="btn-save-article hidden" onclick="saveArticle(this, ${a.id})">SAVE CHANGES</button>
+                                <span class="save-status"></span>
+                            </div>
+                        </div>
                     </td>
                 </tr>
             `;
@@ -601,9 +703,84 @@ async function renderArticles(append = false) {
     } catch (err) { console.error('Articles error:', err); }
 }
 
+const REGION_OPTIONS = {
+    wyoming: [['statewide','Statewide'],['evanston','Evanston'],['casper','Casper'],['cheyenne','Cheyenne']],
+    texas:   [['statewide','TX Statewide'],['dallas','Dallas']],
+    nationwide: [['nationwide','Nationwide']],
+    other:   [['other','Other']],
+};
+
+function regionOptions(state, selected) {
+    const opts = REGION_OPTIONS[state] || REGION_OPTIONS.other;
+    return opts.map(([val, label]) =>
+        `<option value="${val}" ${val===selected?'selected':''}>${label}</option>`
+    ).join('');
+}
+
+function onDetailStateChange(stateSelect) {
+    const panel = stateSelect.closest('.article-detail');
+    const regionSelect = panel.querySelector('.detail-region-select');
+    const newState = stateSelect.value;
+    regionSelect.innerHTML = regionOptions(newState, '');
+    regionSelect.disabled = newState === 'nationwide';
+}
+
 function toggleExpand(idx) {
     const row = document.getElementById(`expand-${idx}`);
     if (row) row.classList.toggle('hidden');
+}
+
+function markArticleDirty(el) {
+    const panel = el.closest('.article-detail');
+    const btn = panel.querySelector('.btn-save-article');
+    btn.classList.remove('hidden');
+    panel.querySelector('.save-status').textContent = '';
+}
+
+async function saveArticle(btn, articleId) {
+    const panel = btn.closest('.article-detail');
+    const selects = panel.querySelectorAll('.detail-select');
+    const payload = {};
+    selects.forEach(sel => { payload[sel.dataset.field] = sel.value; });
+
+    // Map label back to score
+    const scoreMap = { strongly_positive: 5, slightly_positive: 4, neutral: 3, slightly_negative: 2, strongly_negative: 1 };
+    if (payload.sentiment_label) payload.sentiment_score = scoreMap[payload.sentiment_label] || 3;
+
+    btn.disabled = true;
+    btn.textContent = 'SAVING...';
+    const status = panel.querySelector('.save-status');
+    try {
+        const resp = await fetch(`/api/articles/${articleId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (resp.ok) {
+            status.textContent = 'Saved';
+            status.style.color = 'var(--sent-5)';
+            btn.classList.add('hidden');
+            // Update the parent row's pills
+            const expandRow = panel.closest('.expand-row');
+            const dataRow = expandRow.previousElementSibling;
+            if (dataRow) {
+                const cells = dataRow.querySelectorAll('td');
+                cells[3].innerHTML = `<span class="pill ${sentimentPillClass(payload.sentiment_label)}">${sentimentLabel(payload.sentiment_label)}</span>`;
+                cells[4].innerHTML = `<span class="pill pill-state">${STATE_ABBR[payload.state] || (payload.state || '--').toUpperCase()}</span>`;
+                cells[5].innerHTML = `<span class="pill pill-loc">${capitalize(payload.location_relevance || '')}</span>`;
+                cells[6].innerHTML = `<span class="pill pill-${payload.voice_type}">${(payload.voice_type || '').toUpperCase()}</span>`;
+            }
+        } else {
+            const err = await resp.json();
+            status.textContent = err.error || 'Error';
+            status.style.color = 'var(--sent-1)';
+        }
+    } catch (e) {
+        status.textContent = 'Network error';
+        status.style.color = 'var(--sent-1)';
+    }
+    btn.disabled = false;
+    btn.textContent = 'SAVE CHANGES';
 }
 
 function loadMoreArticles() {

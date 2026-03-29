@@ -262,11 +262,15 @@ def articles():
         limit = request.args.get("limit", 25, type=int)
         offset = request.args.get("offset", 0, type=int)
         location = request.args.get("location", "")
+        state = request.args.get("state", "")
         sentiment = request.args.get("sentiment_label", "")
 
         where_clauses = ["analyzed = 1"]
         params = []
 
+        if state:
+            where_clauses.append("state = ?")
+            params.append(state)
         if location:
             where_clauses.append("location_relevance = ?")
             params.append(location)
@@ -282,8 +286,8 @@ def articles():
 
         rows = conn.execute(
             f"SELECT id, title, source, source_type, published_date, "
-            f"sentiment_score, sentiment_label, voice_type, location_relevance, "
-            f"url, key_claims "
+            f"sentiment_score, sentiment_label, voice_type, state, location_relevance, "
+            f"url, key_claims, sentiment_justification, topic_tags, entities_mentioned, summary "
             f"FROM articles WHERE {where_sql} "
             f"ORDER BY published_date DESC LIMIT ? OFFSET ?",
             params + [limit, offset],
@@ -300,9 +304,14 @@ def articles():
                 "sentiment_score": r["sentiment_score"],
                 "sentiment_label": r["sentiment_label"],
                 "voice_type": r["voice_type"],
+                "state": r["state"],
                 "location_relevance": r["location_relevance"],
                 "url": r["url"],
                 "key_claims": r["key_claims"],
+                "sentiment_justification": r["sentiment_justification"],
+                "topic_tags": json.loads(r["topic_tags"]) if r["topic_tags"] else [],
+                "entities_mentioned": json.loads(r["entities_mentioned"]) if r["entities_mentioned"] else [],
+                "summary": r["summary"],
             })
 
         return jsonify({
@@ -311,6 +320,49 @@ def articles():
             "limit": limit,
             "offset": offset,
         })
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────
+# PUT /api/articles/<id>  — edit an article's categorisations
+# ──────────────────────────────────────────────
+@bp.route("/articles/<int:article_id>", methods=["PUT"])
+def update_article(article_id):
+    """Update editable fields on an article."""
+    data = request.get_json(force=True)
+    conn = get_conn()
+    try:
+        existing = conn.execute(
+            "SELECT id FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()
+        if not existing:
+            return jsonify({"error": "Article not found"}), 404
+
+        allowed = {
+            "sentiment_label", "sentiment_score", "voice_type",
+            "state", "location_relevance", "topic_tags", "entities_mentioned",
+            "key_claims", "sentiment_justification",
+        }
+        sets = []
+        params = []
+        for key, val in data.items():
+            if key not in allowed:
+                continue
+            if key in ("topic_tags", "entities_mentioned"):
+                val = json.dumps(val) if isinstance(val, list) else val
+            sets.append(f"{key} = ?")
+            params.append(val)
+
+        if not sets:
+            return jsonify({"error": "No valid fields to update"}), 400
+
+        params.append(article_id)
+        conn.execute(
+            f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", params
+        )
+        conn.commit()
+        return jsonify({"success": True, "updated": list(data.keys())})
     finally:
         conn.close()
 

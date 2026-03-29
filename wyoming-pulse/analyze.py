@@ -12,7 +12,7 @@ from utils import parse_json_response
 
 logger = logging.getLogger("wyoming_pulse.analyze")
 
-SYSTEM_PROMPT = """You are a sentiment analyst tracking public perception of data center development in Wyoming. You work for Prometheus Hyperscale, which has projects in Evanston and Casper, Wyoming.
+SYSTEM_PROMPT = """You are a sentiment analyst tracking public perception of data center development across the United States. You work for Prometheus Hyperscale, which has projects in Evanston and Casper, Wyoming and is expanding nationally.
 
 Analyze the following article and return a JSON object (no markdown fences, no preamble) with these fields:
 
@@ -20,11 +20,17 @@ Analyze the following article and return a JSON object (no markdown fences, no p
   "sentiment_score": <float 1.0-5.0>,
   "sentiment_label": "<strongly_negative|slightly_negative|neutral|slightly_positive|strongly_positive>",
   "voice_type": "<elite|public>",
-  "location_relevance": "<evanston|casper|cheyenne|statewide|other>",
+  "state": "<wyoming|texas|nationwide|other>",
+  "location_relevance": "<statewide|evanston|casper|cheyenne|dallas|nationwide|other>",
   "topic_tags": ["<from: energy_ratepayer, water, jobs_economic, land_use_wildlife, regulation_transparency, tax_incentives, national_security_ai, community_impact>"],
   "entities_mentioned": ["<company or organization names>"],
-  "key_claims": "<1-2 sentence summary of the most notable claims or narratives>"
+  "key_claims": "<1-2 sentence summary of the most notable claims or narratives>",
+  "sentiment_justification": "<1-2 sentences explaining why this specific score was assigned — cite the specific tone, framing, or quotes that drove the rating>"
 }
+
+State and location rules:
+- "state": the US state the article primarily concerns. Use "nationwide" for federal/national policy with no single state focus. Use "other" for states not listed.
+- "location_relevance": the specific city/region within the state. Use "statewide" when the article covers a whole state without a specific city focus. Use "nationwide" only when state is also "nationwide". Wyoming cities: evanston, casper, cheyenne. Texas cities: dallas.
 
 Sentiment scale:
 1.0 = Strongly negative (active opposition, calls for moratorium, fear-based)
@@ -62,7 +68,7 @@ def parse_analysis_response(response_text):
         return None
 
     # Validate required fields
-    required = ["sentiment_score", "sentiment_label", "voice_type", "location_relevance"]
+    required = ["sentiment_score", "sentiment_label", "voice_type", "state", "location_relevance"]
     for field in required:
         if field not in result:
             logger.warning("Missing required field in response: %s", field)
@@ -122,7 +128,7 @@ def analyze_articles(config=None, limit=20):
             try:
                 response = client.messages.create(
                     model=model,
-                    max_tokens=500,
+                    max_tokens=600,
                     timeout=timeout,
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user_msg}],
