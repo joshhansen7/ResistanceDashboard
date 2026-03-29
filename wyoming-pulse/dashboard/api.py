@@ -67,18 +67,31 @@ def get_conn():
 # ──────────────────────────────────────────────
 # /api/overview
 # ──────────────────────────────────────────────
+def _state_filter(base_where="analyzed = 1"):
+    """Build WHERE clause and params with optional ?state= filter."""
+    state = request.args.get("state")
+    if state:
+        return f"{base_where} AND state = ?", [state]
+    return base_where, []
+
+
 @bp.route("/overview")
 def overview():
     conn = get_conn()
     try:
-        total = conn.execute("SELECT COUNT(*) as c FROM articles").fetchone()["c"]
+        where, params = _state_filter()
+        base_where = where.replace("analyzed = 1", "1=1")  # for total (includes unanalyzed)
+
+        total = conn.execute(
+            f"SELECT COUNT(*) as c FROM articles WHERE {base_where}", params
+        ).fetchone()["c"]
         analyzed = conn.execute(
-            "SELECT COUNT(*) as c FROM articles WHERE analyzed = 1"
+            f"SELECT COUNT(*) as c FROM articles WHERE {where}", params
         ).fetchone()["c"]
         pending = total - analyzed
 
         avg_row = conn.execute(
-            "SELECT AVG(sentiment_score) as avg FROM articles WHERE analyzed = 1"
+            f"SELECT AVG(sentiment_score) as avg FROM articles WHERE {where}", params
         ).fetchone()
         avg_sentiment = round(avg_row["avg"], 2) if avg_row["avg"] else None
 
@@ -89,14 +102,14 @@ def overview():
         prev_end = current_start
 
         cur_avg_row = conn.execute(
-            "SELECT AVG(sentiment_score) as avg FROM articles "
-            "WHERE analyzed = 1 AND published_date >= ?",
-            (current_start,),
+            f"SELECT AVG(sentiment_score) as avg FROM articles "
+            f"WHERE {where} AND published_date >= ?",
+            params + [current_start],
         ).fetchone()
         prev_avg_row = conn.execute(
-            "SELECT AVG(sentiment_score) as avg FROM articles "
-            "WHERE analyzed = 1 AND published_date >= ? AND published_date < ?",
-            (prev_start, prev_end),
+            f"SELECT AVG(sentiment_score) as avg FROM articles "
+            f"WHERE {where} AND published_date >= ? AND published_date < ?",
+            params + [prev_start, prev_end],
         ).fetchone()
 
         cur_avg = round(cur_avg_row["avg"], 2) if cur_avg_row["avg"] else None
@@ -135,11 +148,13 @@ def overview():
 def sentiment_trend():
     conn = get_conn()
     try:
+        where, params = _state_filter("analyzed = 1 AND published_date IS NOT NULL")
         rows = conn.execute(
-            "SELECT DATE(published_date) as date, "
-            "AVG(sentiment_score) as avg, COUNT(*) as count "
-            "FROM articles WHERE analyzed = 1 AND published_date IS NOT NULL "
-            "GROUP BY DATE(published_date) ORDER BY date ASC"
+            f"SELECT DATE(published_date) as date, "
+            f"AVG(sentiment_score) as avg, COUNT(*) as count "
+            f"FROM articles WHERE {where} "
+            f"GROUP BY DATE(published_date) ORDER BY date ASC",
+            params,
         ).fetchall()
 
         data = [
@@ -158,12 +173,13 @@ def sentiment_trend():
 def voice_comparison():
     conn = get_conn()
     try:
+        where, params = _state_filter()
         result = {}
         for voice in ("elite", "public"):
             row = conn.execute(
-                "SELECT AVG(sentiment_score) as avg, COUNT(*) as count "
-                "FROM articles WHERE analyzed = 1 AND voice_type = ?",
-                (voice,),
+                f"SELECT AVG(sentiment_score) as avg, COUNT(*) as count "
+                f"FROM articles WHERE {where} AND voice_type = ?",
+                params + [voice],
             ).fetchone()
             result[voice] = {
                 "avg": round(row["avg"], 2) if row["avg"] else None,
@@ -236,8 +252,10 @@ def locations():
 def topics():
     conn = get_conn()
     try:
+        where, params = _state_filter()
         rows = conn.execute(
-            "SELECT topic_tags, sentiment_score FROM articles WHERE analyzed = 1"
+            f"SELECT topic_tags, sentiment_score FROM articles WHERE {where}",
+            params,
         ).fetchall()
 
         topic_data = defaultdict(lambda: {"scores": [], "count": 0})

@@ -432,12 +432,19 @@ async function showUSMap() {
 // ══════════════════════════════════════════════
 //  PAGE 1: DASHBOARD
 // ══════════════════════════════════════════════
+function onDashStateChange() {
+    renderDashboard();
+}
+
 async function renderDashboard() {
     try {
+        const stateFilter = (document.getElementById('dashStateFilter') || {}).value || '';
+        const qs = stateFilter ? `?state=${stateFilter}` : '';
+
         const [overview, trend, voice, stateSentiment] = await Promise.all([
-            fetchJSON('/api/overview'),
-            fetchJSON('/api/sentiment-trend'),
-            fetchJSON('/api/voice-comparison'),
+            fetchJSON(`/api/overview${qs}`),
+            fetchJSON(`/api/sentiment-trend${qs}`),
+            fetchJSON(`/api/voice-comparison${qs}`),
             fetchJSON('/api/state-sentiment'),
         ]);
 
@@ -575,12 +582,20 @@ function renderVoiceChart(voice) {
 // ══════════════════════════════════════════════
 async function renderSentiment() {
     try {
-        const [trend, locations, topics] = await Promise.all([
+        const stateKeys = Object.keys(STATE_CONFIG);
+        const [trend, topics, ...locResults] = await Promise.all([
             fetchJSON('/api/sentiment-trend'),
-            fetchJSON('/api/locations'),
             fetchJSON('/api/topics'),
+            ...stateKeys.map(s => fetchJSON(`/api/locations?state=${s}`)),
         ]);
-        renderLocationHeatmap(trend.data, locations);
+        // Merge all locations with state prefix
+        const allLocations = {};
+        stateKeys.forEach((state, i) => {
+            Object.entries(locResults[i]).forEach(([loc, data]) => {
+                allLocations[`${STATE_ABBR[state] || state}:${loc}`] = data;
+            });
+        });
+        renderLocationHeatmap(trend.data, allLocations);
         renderTopicHeatmap(trend.data, topics);
         renderDistribution();
     } catch (err) { console.error('Sentiment error:', err); }
@@ -592,23 +607,26 @@ function renderLocationHeatmap(trendData, locations) {
     if (!trendData || trendData.length === 0) { el.innerHTML = ''; noData.style.display = 'block'; return; }
     noData.style.display = 'none';
 
-    const locs = ['evanston', 'casper', 'cheyenne', 'statewide'];
+    const locs = Object.keys(locations);
     const dates = trendData.map(d => d.date);
-    el.style.gridTemplateColumns = `90px repeat(${dates.length}, 34px)`;
+    el.style.gridTemplateColumns = `120px repeat(${dates.length}, 34px)`;
 
     let html = '<div class="hm-label"></div>';
     dates.forEach(d => { html += `<div class="hm-header">${fmtDate(d)}</div>`; });
 
     locs.forEach(loc => {
-        html += `<div class="hm-label">${capitalize(loc)}</div>`;
+        const [stateAbbr, locName] = loc.split(':');
+        const displayName = `${stateAbbr} ${locName.replace(/_/g, ' ')}`;
+        const shortName = displayName.length > 16 ? displayName.substring(0, 14) + '..' : displayName;
+        html += `<div class="hm-label" title="${displayName}">${shortName}</div>`;
         dates.forEach((d, i) => {
             const locAvg = locations[loc]?.avg;
             const dayAvg = trendData[i].avg_sentiment;
             const val = locAvg !== null && locAvg !== undefined ? (dayAvg * 0.5 + locAvg * 0.5) : null;
             if (val !== null) {
-                html += `<div class="hm-cell" style="background:${sentimentColor(val)};opacity:0.8" data-tip="${capitalize(loc)} | ${fmtDate(d)} | ${val.toFixed(1)}"></div>`;
+                html += `<div class="hm-cell" style="background:${sentimentColor(val)};opacity:0.8" data-tip="${displayName} | ${fmtDate(d)} | ${val.toFixed(1)}"></div>`;
             } else {
-                html += `<div class="hm-cell empty" data-tip="${capitalize(loc)} | ${fmtDate(d)} | --"></div>`;
+                html += `<div class="hm-cell empty" data-tip="${displayName} | ${fmtDate(d)} | --"></div>`;
             }
         });
     });

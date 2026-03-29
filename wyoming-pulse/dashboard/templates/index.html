@@ -58,6 +58,12 @@
         <div class="page-header">
             <h1>Dashboard</h1>
             <span class="page-sub">sentiment overview</span>
+            <select id="dashStateFilter" class="dash-state-filter" onchange="onDashStateChange()">
+                <option value="">All States</option>
+                <option value="wyoming">Wyoming</option>
+                <option value="texas">Texas</option>
+                <option value="michigan">Michigan</option>
+            </select>
         </div>
         <div class="page-content">
             <div class="dash-grid">

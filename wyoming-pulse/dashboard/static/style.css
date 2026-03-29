@@ -249,6 +249,21 @@ body::after {
     color: var(--text-muted);
 }
 
+.dash-state-filter {
+    margin-left: auto;
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    font-family: var(--font-data);
+    font-size: 11px;
+    padding: 3px 8px;
+    cursor: pointer;
+}
+.dash-state-filter:focus {
+    outline: none;
+    border-color: var(--accent-teal);
+}
+
 .page-content {
     padding: var(--sp-lg) var(--sp-xl);
 }
