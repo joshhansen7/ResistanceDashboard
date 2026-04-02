@@ -227,6 +227,16 @@ def sentiment_index_endpoint():
 # ──────────────────────────────────────────────
 # /api/state-sentiment
 # ──────────────────────────────────────────────
+@bp.route("/state-fips")
+def state_fips():
+    """Return {state_key: fips_code} for all US states."""
+    states = geo.get_all_states()
+    result = {}
+    for key, info in states.items():
+        result[key] = info.get("fips")
+    return jsonify(result)
+
+
 @bp.route("/state-sentiment")
 def state_sentiment():
     """Per-state average sentiment for the US map."""
@@ -254,26 +264,41 @@ def state_sentiment():
 # ──────────────────────────────────────────────
 @bp.route("/locations")
 def locations():
+    """Per-location sentiment for a state, normalized to county level."""
     conn = get_conn()
     try:
         state = request.args.get("state", "wyoming")
-        state_locations = {
-            "wyoming": ["evanston", "casper", "cheyenne", "statewide"],
-            "texas": ["dallas", "statewide"],
-            "michigan": ["ann_arbor", "van_buren", "benton_harbor", "statewide"],
-        }
-        locs = state_locations.get(state, ["statewide"])
+        rows = conn.execute(
+            "SELECT location_relevance, sentiment_score FROM articles "
+            "WHERE analyzed = 1 AND state = ? AND sentiment_score IS NOT NULL",
+            (state,),
+        ).fetchall()
+
+        # Group by county (via geo normalization) or raw location
+        county_scores = defaultdict(list)  # county_name -> [scores]
+        county_fips_map = {}  # county_name -> fips
+        for r in rows:
+            loc = r["location_relevance"] or "statewide"
+            if loc == "statewide":
+                county_scores["statewide"].append(r["sentiment_score"])
+                continue
+            mapping = geo.normalize_location(loc, state)
+            if mapping:
+                county_scores[mapping["county"]].append(r["sentiment_score"])
+                county_fips_map[mapping["county"]] = mapping["fips"]
+            else:
+                # Unmapped locations fold into statewide
+                county_scores["statewide"].append(r["sentiment_score"])
+
         result = {}
-        for loc in locs:
-            row = conn.execute(
-                "SELECT AVG(sentiment_score) as avg, COUNT(*) as count "
-                "FROM articles WHERE analyzed = 1 AND state = ? AND location_relevance = ?",
-                (state, loc),
-            ).fetchone()
-            result[loc] = {
-                "avg": round(row["avg"], 2) if row["avg"] else None,
-                "count": row["count"],
+        for name, scores in county_scores.items():
+            entry = {
+                "avg": round(sum(scores) / len(scores), 2) if scores else None,
+                "count": len(scores),
             }
+            if name in county_fips_map:
+                entry["fips"] = county_fips_map[name]
+            result[name] = entry
         return jsonify(result)
     finally:
         conn.close()
@@ -369,16 +394,23 @@ def location_weekly():
             "ORDER BY published_date ASC"
         ).fetchall()
 
-        # Group by state > location > week
+        # Group by state > county (normalized) > week
         from sentiment_index import _week_start
         from datetime import datetime, timedelta
-        data = {}  # {state: {location: {week: [scores]}}}
+        data = {}  # {state: {county: {week: [scores]}}}
         for r in rows:
             state = r["state"]
             loc = r["location_relevance"] or "statewide"
             ws = _week_start(r["published_date"])
             if not ws or not state:
                 continue
+            # Normalize place names to county level; fold unmapped into statewide
+            if loc != "statewide":
+                mapping = geo.normalize_location(loc, state)
+                if mapping:
+                    loc = mapping["county"]
+                else:
+                    loc = "statewide"
             data.setdefault(state, {}).setdefault(loc, {}).setdefault(ws, [])
             if r["sentiment_score"] is not None:
                 data[state][loc][ws].append(r["sentiment_score"])

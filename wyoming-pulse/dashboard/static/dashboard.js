@@ -12,6 +12,7 @@ let mapActiveState = null;    // 'wyoming' | 'texas' | null
 let mapTopoData = null;       // cached TopoJSON
 let mapStateSentiment = {};   // cached state-level sentiment
 let _statesCache = null;      // cached /api/states response
+let _stateFipsCache = null;   // cached /api/state-fips response
 
 // ── Dynamic state loading ──
 async function getStates() {
@@ -326,10 +327,15 @@ async function renderUSMap(stateSentiment) {
             .on('mouseleave', function() {
                 document.getElementById('mapTooltip').classList.remove('visible');
             })
-            .on('click', function(event, d) {
+            .on('click', async function(event, d) {
                 const key = stateNameToKey(d.properties.name);
                 if (key && STATE_CONFIG[key]) {
                     drillIntoState(key);
+                } else if (key && stateSentiment[key]) {
+                    // Generic drill-down for any state with data
+                    if (!_stateFipsCache) _stateFipsCache = await fetchJSON('/api/state-fips');
+                    const fips = _stateFipsCache[key];
+                    if (fips) drillIntoGenericState(key, d.properties.name, fips);
                 } else {
                     const tooltip = document.getElementById('mapTooltip');
                     tooltip.textContent = `${d.properties.name} — No data yet`;
@@ -394,13 +400,16 @@ async function drillIntoState(stateKey) {
             .attr('stroke', 'rgba(148,163,184,0.15)')
             .attr('stroke-width', 0.5);
 
-        // Fetch location sentiment for this state
+        // Fetch location sentiment for this state (county-normalized)
         const locations = await fetchJSON(`/api/locations?state=${stateKey}`);
-        const cityFips = config.cityCountyFips;
 
-        // Reverse lookup: FIPS -> city key
-        const fipsToCityKey = {};
-        Object.entries(cityFips).forEach(([city, fips]) => { fipsToCityKey[fips] = city; });
+        // Build FIPS -> county name lookup from API response
+        const fipsToCounty = {};
+        Object.entries(locations).forEach(([name, data]) => {
+            if (data.fips) fipsToCounty[data.fips] = name;
+        });
+        // Also include hardcoded cityCountyFips for marker rendering
+        const cityFips = config.cityCountyFips;
 
         // Draw counties
         svg.selectAll('.county-path')
@@ -414,9 +423,9 @@ async function drillIntoState(stateKey) {
                 const fips = String(d.id);
                 const countyName = (d.properties && d.properties.name) ? d.properties.name : `FIPS ${fips}`;
                 const tooltip = document.getElementById('mapTooltip');
-                const cityKey = fipsToCityKey[fips];
-                if (cityKey && locations[cityKey] && locations[cityKey].avg !== null) {
-                    tooltip.textContent = `${countyName} Co. | avg: ${locations[cityKey].avg.toFixed(1)} | n=${locations[cityKey].count}`;
+                const county = fipsToCounty[fips];
+                if (county && locations[county] && locations[county].avg !== null) {
+                    tooltip.textContent = `${countyName} Co. | avg: ${locations[county].avg.toFixed(1)} | n=${locations[county].count}`;
                 } else {
                     tooltip.textContent = `${countyName} Co.`;
                 }
@@ -427,13 +436,15 @@ async function drillIntoState(stateKey) {
                 document.getElementById('mapTooltip').classList.remove('visible');
             });
 
-        // Color counties with city data
-        Object.entries(cityFips).forEach(([loc, fips]) => {
-            const el = document.querySelector(`.county-path[data-fips="${fips}"]`);
-            if (el && locations[loc] && locations[loc].avg !== null) {
-                el.style.fill = sentimentColor(locations[loc].avg);
-                el.style.stroke = '#14b8a6';
-                el.style.strokeWidth = '0.8';
+        // Color counties using FIPS from API response
+        Object.entries(locations).forEach(([name, data]) => {
+            if (data.fips && data.avg !== null) {
+                const el = document.querySelector(`.county-path[data-fips="${data.fips}"]`);
+                if (el) {
+                    el.style.fill = sentimentColor(data.avg);
+                    el.style.stroke = '#14b8a6';
+                    el.style.strokeWidth = '0.8';
+                }
             }
         });
 
@@ -478,6 +489,114 @@ async function drillIntoState(stateKey) {
 
     } catch (err) {
         console.error('State map render error:', err);
+        container.innerHTML = '<div class="no-data">Map unavailable</div>';
+    }
+}
+
+// ── Generic state drill-down (for states without hardcoded config) ──
+async function drillIntoGenericState(stateKey, stateName, fips) {
+    const container = document.getElementById('wyomingMap');
+    container.innerHTML = '';
+
+    try {
+        const us = await ensureTopoData();
+        const counties = topojson.feature(us, us.objects.counties);
+        const statesGeo = topojson.feature(us, us.objects.states);
+
+        const stateCounties = {
+            type: 'FeatureCollection',
+            features: counties.features.filter(f => String(f.id).startsWith(fips))
+        };
+        const stateOutline = {
+            type: 'FeatureCollection',
+            features: statesGeo.features.filter(f => String(f.id) === fips)
+        };
+
+        const width = container.clientWidth;
+        const height = container.clientHeight || 330;
+        const projection = d3.geoAlbersUsa().fitSize([width, height], stateOutline);
+        const path = d3.geoPath().projection(projection);
+
+        const svg = d3.select(container)
+            .append('svg')
+            .attr('width', width)
+            .attr('height', height);
+
+        // Neighboring states
+        const neighborStates = statesGeo.features.filter(f => String(f.id) !== fips);
+        svg.selectAll('.neighbor-state')
+            .data(neighborStates)
+            .enter()
+            .append('path')
+            .attr('class', 'neighbor-state')
+            .attr('d', path)
+            .attr('fill', '#0a0e17')
+            .attr('stroke', 'rgba(148,163,184,0.15)')
+            .attr('stroke-width', 0.5);
+
+        // Fetch county-level sentiment
+        const locations = await fetchJSON(`/api/locations?state=${stateKey}`);
+        const fipsToCounty = {};
+        Object.entries(locations).forEach(([name, data]) => {
+            if (data.fips) fipsToCounty[data.fips] = name;
+        });
+
+        // Draw counties
+        svg.selectAll('.county-path')
+            .data(stateCounties.features)
+            .enter()
+            .append('path')
+            .attr('class', 'county-path')
+            .attr('d', path)
+            .attr('data-fips', d => d.id)
+            .on('mouseenter', function(event, d) {
+                const cfips = String(d.id);
+                const countyName = (d.properties && d.properties.name) ? d.properties.name : `FIPS ${cfips}`;
+                const tooltip = document.getElementById('mapTooltip');
+                const county = fipsToCounty[cfips];
+                if (county && locations[county] && locations[county].avg !== null) {
+                    tooltip.textContent = `${countyName} Co. | avg: ${locations[county].avg.toFixed(1)} | n=${locations[county].count}`;
+                } else {
+                    tooltip.textContent = `${countyName} Co.`;
+                }
+                tooltip.classList.add('visible');
+            })
+            .on('mousemove', function(event) { positionTooltip(event, container); })
+            .on('mouseleave', function() {
+                document.getElementById('mapTooltip').classList.remove('visible');
+            });
+
+        // Color counties
+        Object.entries(locations).forEach(([name, data]) => {
+            if (data.fips && data.avg !== null) {
+                const el = document.querySelector(`.county-path[data-fips="${data.fips}"]`);
+                if (el) {
+                    el.style.fill = sentimentColor(data.avg);
+                    el.style.stroke = '#14b8a6';
+                    el.style.strokeWidth = '0.8';
+                }
+            }
+        });
+
+        // State outline
+        if (stateOutline.features[0]) {
+            svg.append('path')
+                .datum(stateOutline.features[0])
+                .attr('d', path)
+                .attr('fill', 'none')
+                .attr('stroke', '#14b8a6')
+                .attr('stroke-width', 1)
+                .attr('stroke-opacity', 0.3);
+        }
+
+        mapView = 'county';
+        mapActiveState = stateKey;
+        document.getElementById('mapTitle').textContent = stateName;
+        document.getElementById('mapBackBtn').style.display = '';
+        updateMetrics(`?state=${stateKey}`);
+
+    } catch (err) {
+        console.error('Generic state map render error:', err);
         container.innerHTML = '<div class="no-data">Map unavailable</div>';
     }
 }
@@ -882,7 +1001,7 @@ function renderLocationHeatmap(locWeekly) {
         // Location rows (collapsible)
         if (isExpanded) {
             locKeys.forEach(loc => {
-                const locDisplay = loc.replace(/_/g, ' ');
+                const locDisplay = loc === 'statewide' ? 'General' : loc.replace(/_/g, ' ');
                 const locLabel = `${locDisplay}`;
                 const cells = locations[loc] || [];
                 html += `<div class="hm-label hm-loc-label">${locLabel}</div>`;
@@ -1171,7 +1290,7 @@ async function renderArticles(append = false) {
                     <td>${fmtDate(a.published_date)}</td>
                     <td><span class="pill ${sentimentPillClass(a.sentiment_label)}">${sentimentLabel(a.sentiment_label)}</span></td>
                     <td><span class="pill pill-state">${getStateAbbr(a.state)}</span></td>
-                    <td><span class="pill pill-loc">${capitalize(a.location_relevance || '')}</span></td>
+                    <td><span class="pill pill-loc">${a.location_relevance === 'statewide' ? 'General' : capitalize(a.location_relevance || '')}</span></td>
                 </tr>
                 <tr class="expand-row hidden" id="expand-${idx}">
                     <td colspan="6">
