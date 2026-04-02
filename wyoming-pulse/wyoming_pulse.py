@@ -30,6 +30,7 @@ import ingest
 import analyze
 import digest
 import manual_input
+import historical_backfill
 
 
 def setup_logging():
@@ -215,6 +216,38 @@ def cmd_backfill(args):
     print("\n✅ Backfill complete!")
 
 
+def cmd_historical_backfill(args):
+    """Historical backfill: sweep Google News with date-range queries."""
+    print("\n📜 Wyoming Pulse — Historical Backfill")
+    print("=" * 40)
+
+    result = historical_backfill.run_historical_backfill(
+        start_date=args.from_date,
+        end_date=args.to_date,
+        state=args.state,
+        dry_run=args.dry_run,
+        skip_analysis=args.skip_analysis,
+    )
+
+    if result.get("error"):
+        print(f"\nError: {result['error']}")
+        return
+
+    print(f"\nResults:")
+    print(f"  Total fetched:     {result['total_fetched']}")
+    print(f"  New articles:      {result['total_new']}")
+    print(f"  Skipped (URL):     {result['skipped_url']}")
+    print(f"  Skipped (title):   {result['skipped_title']}")
+    print(f"  Auto-inserted:     {result['auto_inserted']}")
+    print(f"  Sent to pending:   {result['sent_to_pending']}")
+    if result.get("analyzed"):
+        print(f"  Analyzed:          {result['analyzed']}")
+    if result["dry_run"]:
+        print("\n  (Dry run — no changes were made)")
+
+    print("\n✅ Historical backfill complete!")
+
+
 def main():
     """Main entry point with argument parsing."""
     parser = argparse.ArgumentParser(
@@ -257,6 +290,32 @@ def main():
     # backfill
     subparsers.add_parser("backfill", help="Ingest + analyze all + baseline digest")
 
+    # historical-backfill
+    hb_parser = subparsers.add_parser(
+        "historical-backfill",
+        help="Backfill articles from Google News over a historical date range",
+    )
+    hb_parser.add_argument(
+        "--from", dest="from_date", default="2025-09-01",
+        help="Start date (YYYY-MM-DD, default: 2025-09-01)",
+    )
+    hb_parser.add_argument(
+        "--to", dest="to_date", default=None,
+        help="End date (YYYY-MM-DD, default: today)",
+    )
+    hb_parser.add_argument(
+        "--state", default=None,
+        help="Limit to one state (e.g. wyoming, texas, michigan)",
+    )
+    hb_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Fetch and match but don't write to DB or call API",
+    )
+    hb_parser.add_argument(
+        "--skip-analysis", action="store_true",
+        help="Ingest only; skip sentiment analysis",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -276,6 +335,7 @@ def main():
         "dashboard": cmd_dashboard,
         "manual": cmd_manual,
         "backfill": cmd_backfill,
+        "historical-backfill": cmd_historical_backfill,
     }
 
     cmd_func = commands.get(args.command)
