@@ -470,8 +470,11 @@ async function drillIntoState(stateKey) {
 
         mapView = 'county';
         mapActiveState = stateKey;
-        document.getElementById('mapTitle').textContent = `${config.name} Counties`;
+        document.getElementById('mapTitle').textContent = config.name;
         document.getElementById('mapBackBtn').style.display = '';
+
+        // Update key metrics to reflect the clicked state
+        updateMetrics(`?state=${stateKey}`);
 
     } catch (err) {
         console.error('State map render error:', err);
@@ -485,6 +488,11 @@ async function showUSMap() {
         mapStateSentiment = await fetchJSON('/api/state-sentiment');
     }
     renderUSMap(mapStateSentiment);
+
+    // Reset key metrics to match the dropdown filter (or all states)
+    const stateFilter = (document.getElementById('dashStateFilter') || {}).value || '';
+    const qs = stateFilter ? `?state=${stateFilter}` : '';
+    updateMetrics(qs);
 }
 
 // ══════════════════════════════════════════════
@@ -494,44 +502,60 @@ function onDashStateChange() {
     renderDashboard();
 }
 
+function applyMetrics(overview, wsiData) {
+    document.getElementById('metricTotal').textContent = overview.total_articles;
+    document.getElementById('metricAnalyzed').textContent = overview.analyzed_articles || 0;
+
+    const avgEl = document.getElementById('metricSentiment');
+    if (overview.avg_sentiment !== null) {
+        avgEl.textContent = overview.avg_sentiment.toFixed(2);
+        avgEl.style.color = sentimentColor(overview.avg_sentiment);
+    } else { avgEl.textContent = '--'; }
+
+    const wsiEl = document.getElementById('metricWSI');
+    if (wsiData.current_wsi !== null) {
+        wsiEl.textContent = wsiData.current_wsi.toFixed(2);
+        wsiEl.style.color = sentimentColor(wsiData.current_wsi);
+    } else { wsiEl.textContent = '--'; }
+
+    const trendEl = document.getElementById('metricTrend');
+    const pc = wsiData.period_comparison;
+    if (pc && pc.change !== null) {
+        const arrow = pc.direction === 'improving' ? '\u25B2' : pc.direction === 'declining' ? '\u25BC' : '\u25C6';
+        const color = pc.direction === 'improving' ? 'var(--sent-5)' : pc.direction === 'declining' ? 'var(--sent-1)' : 'var(--sent-3)';
+        trendEl.textContent = `${arrow} ${pc.change > 0 ? '+' : ''}${pc.change.toFixed(2)}`;
+        trendEl.style.color = color;
+    } else { trendEl.textContent = '--'; }
+
+    document.getElementById('lastSync').textContent = overview.last_ingestion ? timeAgo(overview.last_ingestion) : '--';
+}
+
+async function updateMetrics(qs) {
+    try {
+        const [overview, wsiData] = await Promise.all([
+            fetchJSON(`/api/overview${qs}`),
+            fetchJSON(`/api/sentiment-index${qs}`),
+        ]);
+        applyMetrics(overview, wsiData);
+    } catch (err) { console.error('Metrics update error:', err); }
+}
+
 async function renderDashboard() {
     try {
         const stateFilter = (document.getElementById('dashStateFilter') || {}).value || '';
         const qs = stateFilter ? `?state=${stateFilter}` : '';
 
-        const [overview, wsiData, stateSentiment] = await Promise.all([
-            fetchJSON(`/api/overview${qs}`),
-            fetchJSON(`/api/sentiment-index${qs}`),
+        // If drilled into a state on the map, metrics should reflect that state
+        const metricsQs = (mapView === 'county' && mapActiveState)
+            ? `?state=${mapActiveState}` : qs;
+
+        const [stateSentiment, overview, wsiData] = await Promise.all([
             fetchJSON('/api/state-sentiment'),
+            fetchJSON(`/api/overview${metricsQs}`),
+            fetchJSON(`/api/sentiment-index${metricsQs}`),
         ]);
 
-        // Metrics
-        document.getElementById('metricTotal').textContent = overview.total_articles;
-        document.getElementById('metricAnalyzed').textContent = overview.analyzed_articles || 0;
-
-        const avgEl = document.getElementById('metricSentiment');
-        if (overview.avg_sentiment !== null) {
-            avgEl.textContent = overview.avg_sentiment.toFixed(2);
-            avgEl.style.color = sentimentColor(overview.avg_sentiment);
-        } else { avgEl.textContent = '--'; }
-
-        const wsiEl = document.getElementById('metricWSI');
-        if (wsiData.current_wsi !== null) {
-            wsiEl.textContent = wsiData.current_wsi.toFixed(2);
-            wsiEl.style.color = sentimentColor(wsiData.current_wsi);
-        } else { wsiEl.textContent = '--'; }
-
-        const trendEl = document.getElementById('metricTrend');
-        const pc = wsiData.period_comparison;
-        if (pc && pc.change !== null) {
-            const arrow = pc.direction === 'improving' ? '\u25B2' : pc.direction === 'declining' ? '\u25BC' : '\u25C6';
-            const color = pc.direction === 'improving' ? 'var(--sent-5)' : pc.direction === 'declining' ? 'var(--sent-1)' : 'var(--sent-3)';
-            trendEl.textContent = `${arrow} ${pc.change > 0 ? '+' : ''}${pc.change.toFixed(2)}`;
-            trendEl.style.color = color;
-        } else { trendEl.textContent = '--'; }
-
-        // Sync
-        document.getElementById('lastSync').textContent = overview.last_ingestion ? timeAgo(overview.last_ingestion) : '--';
+        applyMetrics(overview, wsiData);
 
         // Map — default to US view, but don't reset if user drilled into a state
         if (mapView === 'none' || mapView === 'us') {
