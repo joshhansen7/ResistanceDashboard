@@ -15,7 +15,9 @@ import feedparser
 import requests
 
 import db
+from geo import infer_state_from_text
 from ingest import check_keyword_match, detect_location, _score_relevance
+from scraper import resolve_google_news_url
 from shared import load_config, get_anthropic_client
 from utils import clean_html, normalize_for_comparison
 
@@ -23,7 +25,7 @@ logger = logging.getLogger("wyoming_pulse.websearch")
 
 USER_AGENT = "PrometheusDashboard/1.0 (News Research; +https://github.com/prometheus-hyperscale)"
 
-DEFAULT_QUERY = '"data center" Wyoming OR Texas OR Michigan'
+DEFAULT_QUERY = '"data center"'
 
 
 def _extract_source_from_title(title):
@@ -72,6 +74,7 @@ def run_websearch(query=None, days_back=30, state=None):
                                                                      "claude-haiku-4-5-20251001"))
 
     search_id = str(uuid.uuid4())[:8]
+    is_manual_query = query is not None
 
     # Build list of queries to run
     queries_to_run = []
@@ -79,15 +82,21 @@ def run_websearch(query=None, days_back=30, state=None):
         # Explicit query — run it without state association
         queries_to_run.append({"query": query.strip(), "state": state})
     else:
-        # Use per-state web_search_queries from config
-        states = config.get("states", {})
-        for state_key, state_cfg in states.items():
+        # Nationwide discovery queries (run for all states or when no specific state)
+        if not state:
+            nationwide = config.get("nationwide", {})
+            for q in nationwide.get("web_search_queries", []):
+                queries_to_run.append({"query": q, "state": None})
+
+        # Priority state targeted queries
+        priority_states = config.get("priority_states", {})
+        for state_key, state_cfg in priority_states.items():
             if state and state_key != state:
                 continue
             for q in state_cfg.get("web_search_queries", []):
                 queries_to_run.append({"query": q, "state": state_key})
 
-        # Fallback: if no per-state queries, use default
+        # Fallback: if no queries at all, use default
         if not queries_to_run:
             queries_to_run.append({"query": DEFAULT_QUERY, "state": None})
 
@@ -144,6 +153,13 @@ def run_websearch(query=None, days_back=30, state=None):
                         pass
                     break
 
+            # Resolve Google News redirect URLs to actual article URLs
+            if "news.google.com" in link:
+                resolved = resolve_google_news_url(link, interval=0.3)
+                if resolved != link:
+                    logger.debug("Resolved: %s -> %s", link[:60], resolved[:80])
+                    link = resolved
+
             # Cross-query dedup
             if link in seen_urls:
                 continue
@@ -174,11 +190,21 @@ def run_websearch(query=None, days_back=30, state=None):
 
             existing_titles.append(title)
 
-            # Keyword filtering — try query's state first, then all states
+            # Keyword matching — metadata only for websearch (NOT a gate).
+            # The Google News query itself is the topical filter; the LLM
+            # relevance scorer is the quality gate.
             keywords, score, matched_state = check_keyword_match(
                 title, summary, config, state_key=query_state
             )
-            location = detect_location(title, summary, config, state_key=matched_state or query_state)
+            if not keywords:
+                keywords, score = [], 0
+
+            # Determine final state: keyword match > query state > text inference > nationwide
+            final_state = matched_state or query_state
+            if not final_state:
+                final_state = infer_state_from_text(title, summary)
+
+            location = detect_location(title, summary, config, state_key=final_state)
 
             matched_articles.append({
                 "source": source,
@@ -189,7 +215,7 @@ def run_websearch(query=None, days_back=30, state=None):
                 "matched_keywords": keywords or [],
                 "keyword_score": score,
                 "location_relevance": location,
-                "state": matched_state or query_state,
+                "state": final_state,
             })
 
         time.sleep(1)  # Rate limit between queries
@@ -198,19 +224,22 @@ def run_websearch(query=None, days_back=30, state=None):
     logger.info("After dedup: %d new articles (%d URL dupes, %d title dupes)",
                 keyword_matches, skipped_url, skipped_title)
 
-    # Relevance scoring
+    # Relevance scoring (local LLM first, Claude fallback)
+    from ingest import score_relevance_hybrid
     client = get_anthropic_client()
     api_key_set = client is not None
     scored = 0
     auto_approved = 0
 
     for article in matched_articles:
-        if client:
-            rel_score, rel_reason = _score_relevance(client, relevance_model, article)
+        rel_score, rel_reason = score_relevance_hybrid(
+            article, client, relevance_model,
+        )
+        if rel_score is not None:
             article["relevance_score"] = rel_score
             article["relevance_reason"] = rel_reason
             scored += 1
-            time.sleep(0.3)
+            time.sleep(0.1)
 
             # Auto-approve if above threshold
             if auto_threshold and rel_score >= auto_threshold:
@@ -224,6 +253,8 @@ def run_websearch(query=None, days_back=30, state=None):
                     "summary": article["summary"],
                     "matched_keywords": article["matched_keywords"],
                     "keyword_score": article["keyword_score"],
+                    "state": article["state"],
+                    "location_relevance": article["location_relevance"],
                 }
                 result = db.insert_article(conn, article_data)
                 if result is not None:

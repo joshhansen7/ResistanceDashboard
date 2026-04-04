@@ -1,10 +1,263 @@
 # Prometheus Resistance Dashboard — Configuration
-# Multi-state sentiment tracking for data center development
+# Nationwide data center sentiment tracking
 
-# ──────────────────────────────────────────────
-# Per-state configuration: feeds, keywords, locations, search queries
-# ──────────────────────────────────────────────
-states:
+# ══════════════════════════════════════════════════
+# Nationwide keyword & search configuration
+# Applies to ALL articles regardless of state
+# ══════════════════════════════════════════════════
+nationwide:
+  keywords:
+    # ── Primary: any single match = article is relevant (score 1.0) ──
+    primary:
+      # Direct identifiers
+      - "data center"
+      - "data centre"
+      - "datacenter"
+      - "hyperscale"
+      - "server farm"
+      - "colocation"
+      - "colo facility"
+      - "Prometheus Hyperscale"
+      # Scale / type descriptors
+      - "AI data center"
+      - "AI factory"
+      - "AI superfactory"
+      - "AI infrastructure"
+      - "edge data center"
+      - "modular data center"
+      - "cloud data center"
+      - "wholesale data center"
+      - "hyperscale campus"
+      - "compute campus"
+      # Regulatory / opposition
+      - "data center moratorium"
+      - "data center ban"
+      - "data center zoning"
+      - "data center ordinance"
+      - "data center permit"
+      - "data center setback"
+      # Construction / development
+      - "data center campus"
+      - "data center construction"
+      - "data center development"
+      - "data center site"
+      - "data center proposal"
+      - "data center project"
+      - "data center approved"
+      - "data center expansion"
+      # Infrastructure impact
+      - "data center power"
+      - "data center energy"
+      - "data center electricity"
+      - "data center cooling"
+      - "data center water"
+      - "data center noise"
+      - "data center grid"
+
+    # ── Companies: require topic signal co-occurrence (score 0.9/0.8) ──
+    companies:
+      # Hyperscalers
+      - "Microsoft"
+      - "Meta"
+      - "Amazon"
+      - "AWS"
+      - "Google"
+      - "Apple"
+      - "Oracle"
+      - "ByteDance"
+      # AI companies
+      - "OpenAI"
+      - "Anthropic"
+      - "xAI"
+      - "CoreWeave"
+      - "Inflection AI"
+      - "Cohere"
+      # Data center developers / operators
+      - "Equinix"
+      - "Digital Realty"
+      - "QTS"
+      - "CyrusOne"
+      - "Vantage Data Centers"
+      - "Compass Datacenters"
+      - "EdgeCore"
+      - "Applied Digital"
+      - "Core Scientific"
+      - "Lancium"
+      - "Switch"
+      - "CloudHQ"
+      - "DataBank"
+      - "T5 Data Centers"
+      - "Aligned Data Centers"
+      - "Flexential"
+      - "Iron Mountain Data Centers"
+      - "Prime Data Centers"
+      - "Stack Infrastructure"
+      - "Stream Data Centers"
+      - "Yondr"
+      - "TerraScale"
+      - "Skybox"
+      - "Cologix"
+      - "NTT Data Centers"
+      - "Crusoe Energy"
+      # Investment / financial
+      - "DigitalBridge"
+      - "Blackstone"
+      - "KKR"
+      - "SoftBank"
+      - "Blue Owl Capital"
+      - "Brookfield Infrastructure"
+      - "MGX"
+      # Energy / utility partners (use full names to avoid ambiguity)
+      - "Constellation Energy"
+      - "Vistra Energy"
+      - "Talen Energy"
+      - "Entergy"
+      - "Duke Energy"
+      - "Dominion Energy"
+      - "TVA"
+      - "NextEra Energy"
+      - "Southern Company"
+      - "AEP"
+      - "Oklo"
+      - "NuScale"
+      - "TerraPower"
+      - "Kairos Power"
+      - "Tallgrass Energy"
+      - "Bloom Energy"
+      - "Energy Northwest"
+      # Construction / engineering
+      - "Turner Construction"
+      - "DPR Construction"
+      - "Holder Construction"
+      - "HITT Contracting"
+      - "Mortenson"
+      - "Clayco"
+      - "Fortis Construction"
+      - "JE Dunn"
+      - "Fluor Corporation"
+      # Cooling / infrastructure tech
+      - "Vertiv"
+      - "Schneider Electric"
+      - "Green Revolution Cooling"
+      - "CoolIT Systems"
+      - "nVent"
+
+    # ── Secondary: require co-occurrence with primary/company/topic signal (score 0.6) ──
+    secondary:
+      # Grid / energy
+      - "large load"
+      - "megawatt"
+      - "gigawatt"
+      - "grid capacity"
+      - "interconnection queue"
+      - "power purchase agreement"
+      - "behind the meter"
+      - "industrial load"
+      - "load growth"
+      - "peak demand"
+      - "grid reliability"
+      - "transmission capacity"
+      - "capacity market"
+      - "capacity auction"
+      - "integrated resource plan"
+      # Grid operators / regulators
+      - "PJM"
+      - "ERCOT"
+      - "MISO"
+      - "CAISO"
+      - "FERC"
+      - "SPP"
+      # Water / cooling
+      - "cooling water"
+      - "water consumption"
+      - "evaporative cooling"
+      - "water rights"
+      - "water withdrawal"
+      - "water usage effectiveness"
+      # Land use / zoning
+      - "industrial siting"
+      - "industrial zoning"
+      - "special use permit"
+      - "conditional use permit"
+      - "rezoning"
+      - "special exception"
+      - "setback requirement"
+      # Economic / tax
+      - "ratepayer"
+      - "tax abatement"
+      - "tax incentive"
+      - "tax exemption"
+      - "enterprise zone"
+      - "PILOT agreement"
+      - "rate increase"
+      - "rate class"
+      # Community impact
+      - "noise ordinance"
+      - "noise pollution"
+      - "community impact"
+      - "environmental justice"
+      - "environmental racism"
+      # Opposition organizations
+      - "Food and Water Watch"
+      - "Data Center Watch"
+      - "Good Jobs First"
+      - "Sierra Club"
+      - "FracTracker Alliance"
+      # Nuclear / advanced energy
+      - "small modular reactor"
+      - "SMR"
+      - "nuclear restart"
+      - "advanced reactor"
+
+  # ── Nationwide web search queries ──
+  # Organized in tiers: core discovery, company/project, regional, thematic
+  web_search_queries:
+    # Core discovery (high-signal, broad sweep)
+    - '"data center" construction OR development OR proposed'
+    - '"data center" opposition OR moratorium OR ban OR protest'
+    - '"data center" zoning OR rezoning OR permit OR approved'
+    - '"data center" electricity OR power OR grid OR demand'
+    - '"data center" water OR cooling OR drought'
+    - '"data center" ratepayer OR "rate increase" OR "electricity bill"'
+    - '"data center" "tax incentive" OR "tax abatement" OR subsidy'
+    - '"data center" noise OR pollution OR "community impact"'
+    - '"data center" nuclear OR SMR OR "small modular reactor"'
+    - '"hyperscale" data center OR campus'
+    - '"AI data center" OR "AI infrastructure" OR "AI factory"'
+    # Company / project specific
+    - '"Stargate" data center OR OpenAI OR SoftBank'
+    - 'xAI data center OR Colossus OR supercomputer'
+    - 'Anthropic data center OR infrastructure'
+    - 'Meta Hyperion OR "Meta data center"'
+    - 'Microsoft "data center" OR "AI superfactory"'
+    - 'Amazon "data center" OR "Project Rainier"'
+    - 'Google "data center" OR "Kairos Power"'
+    - 'Equinix OR "Digital Realty" data center'
+    - 'QTS OR CyrusOne OR Vantage data center'
+    - '"Compass Datacenters" OR "Applied Digital" OR "Core Scientific"'
+    - 'Crusoe Energy data center'
+    - '"Constellation Energy" OR Vistra OR "Talen Energy" "data center"'
+    # Regional sweeps
+    - '"Northern Virginia" OR "Loudoun County" OR "Prince William County" data center'
+    - '"data center" Texas OR ERCOT'
+    - '"data center" Ohio OR Columbus OR "New Albany"'
+    - '"data center" Georgia OR Atlanta'
+    - '"data center" Louisiana OR Mississippi'
+    - '"data center" Indiana OR Wisconsin'
+    - '"data center" Arizona OR Phoenix OR "North Carolina"'
+    # Thematic / issue
+    - '"data center" "environmental justice" OR "Clean Air Act" OR emissions'
+    - '"data center" legislation OR bill OR moratorium 2026'
+    - '"data center" "interconnection queue" OR "grid capacity" OR FERC OR PJM'
+    - '"data center" "behind the meter" OR colocation power nuclear'
+    - 'Prometheus Hyperscale'
+
+
+# ══════════════════════════════════════════════════
+# Priority states — deep monitoring with RSS feeds
+# and specific location tracking
+# ══════════════════════════════════════════════════
+priority_states:
   wyoming:
     feeds:
       - name: "Casper Star-Tribune"
@@ -29,9 +282,9 @@ states:
         url: ""
         enabled: false  # No public RSS; add articles manually
     keywords:
-      primary: ["data center", "hyperscale", "server farm"]
+      primary: []
       companies: ["Crusoe", "Tallgrass", "Project Jade"]
-      secondary: ["large load", "megawatt", "gigawatt", "industrial siting", "ratepayer", "energy demand", "grid capacity", "cooling water"]
+      secondary: ["energy demand"]
     locations:
       evanston: ["Evanston", "Uinta County", "southwest Wyoming"]
       casper: ["Casper", "Natrona County", "central Wyoming"]
@@ -53,11 +306,12 @@ states:
         url: "https://feeds.bizjournals.com/bizj_dallas"
         enabled: true
     keywords:
-      primary: ["data center", "hyperscale", "server farm"]
-      companies: ["Equinix", "CyrusOne", "DataBank", "QTS", "Skybox", "Stream Data Centers", "Stack Infrastructure", "Yondr"]
-      secondary: ["ERCOT", "interconnection", "large load", "megawatt", "grid capacity", "cooling water", "power purchase"]
+      primary: []
+      companies: ["Skybox", "Stream Data Centers"]
+      secondary: ["ERCOT", "power purchase"]
     locations:
-      dallas: ["Dallas", "Dallas-Fort Worth", "DFW", "Ellis County", "Lancaster", "Red Oak", "Venus"]
+      dallas: ["Dallas", "Dallas-Fort Worth", "DFW", "Ellis County",
+               "Lancaster", "Red Oak", "Venus"]
     web_search_queries:
       - '"data center" Dallas OR "Dallas-Fort Worth"'
       - 'ERCOT "data center" Texas'
@@ -77,9 +331,9 @@ states:
         url: "https://gandernewsroom.com/feed/"
         enabled: true
     keywords:
-      primary: ["data center", "hyperscale", "server farm"]
-      companies: ["Google", "Oracle", "OpenAI", "Panattoni", "Related Digital", "Green Chile Ventures"]
-      secondary: ["DTE Energy", "MPSC", "large load", "megawatt", "cooling water", "Project Cannoli", "Consumers Energy"]
+      primary: []
+      companies: ["Panattoni", "Related Digital", "Green Chile Ventures"]
+      secondary: ["DTE Energy", "MPSC", "Project Cannoli", "Consumers Energy"]
     locations:
       ann_arbor: ["Ann Arbor", "Saline Township", "Washtenaw County"]
       van_buren: ["Van Buren Township", "Wayne County"]
@@ -90,11 +344,51 @@ states:
       - '"data center" "Benton Harbor" OR "Berrien County"'
 
 # ──────────────────────────────────────────────
-# Global keywords — apply to ALL states
+# Topic categories for article classification
 # ──────────────────────────────────────────────
-global_keywords:
-  primary: ["Prometheus Hyperscale", "data centre"]
-  companies: ["Microsoft", "Meta", "Amazon", "AWS"]
+topics:
+  - key: energy_ratepayer
+    label: "Energy & Ratepayer Impact"
+    description: "Electricity costs, rate increases, ratepayer burden from data center loads"
+  - key: grid_infrastructure
+    label: "Grid & Infrastructure"
+    description: "Power grid capacity, transmission lines, utility planning, interconnection"
+  - key: water
+    label: "Water Usage"
+    description: "Cooling water consumption, aquifer impact, drought concerns, water rights"
+  - key: jobs_economic
+    label: "Jobs & Economic Development"
+    description: "Employment, tax revenue, economic growth, workforce development"
+  - key: land_use_wildlife
+    label: "Land Use & Wildlife"
+    description: "Zoning, farmland conversion, habitat disruption, site selection"
+  - key: regulation_transparency
+    label: "Regulation & Transparency"
+    description: "Permitting, moratoriums, public disclosure, legislative action, bans"
+  - key: tax_incentives
+    label: "Tax Incentives"
+    description: "Tax abatements, incentive packages, public subsidies, TIF districts"
+  - key: national_security_ai
+    label: "National Security & AI"
+    description: "AI infrastructure as national priority, defense applications, security"
+  - key: community_impact
+    label: "Community Impact"
+    description: "Noise, traffic, quality of life, local opposition or support, public meetings"
+  - key: environmental
+    label: "Environmental"
+    description: "Carbon emissions, renewable energy commitments, climate impact, pollution"
+  - key: property_housing
+    label: "Property & Housing"
+    description: "Property values, housing market impact, real estate, construction disruption"
+
+# ──────────────────────────────────────────────
+# Local LLM (Ollama) — for relevance scoring, classification, summarization
+# ──────────────────────────────────────────────
+local_llm:
+  enabled: true
+  model: "qwen3:8b"
+  base_url: "http://localhost:11434"
+  fallback_to_api: true  # use Claude API if Ollama unavailable
 
 # ──────────────────────────────────────────────
 # Pipeline settings

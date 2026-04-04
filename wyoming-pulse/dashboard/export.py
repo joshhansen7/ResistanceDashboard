@@ -11,13 +11,7 @@ from pathlib import Path
 
 import db
 import sentiment_index
-
-
-STATE_LOCATIONS = {
-    "wyoming": ["evanston", "casper", "cheyenne", "statewide"],
-    "texas": ["dallas", "statewide"],
-    "michigan": ["ann_arbor", "van_buren", "benton_harbor", "statewide"],
-}
+from shared import load_config
 
 
 def generate_export_html(db_path):
@@ -67,12 +61,45 @@ def _get_overview(conn):
     }
 
 
+def _get_tracked_states(conn):
+    """Derive tracked states from the database (states with analyzed articles)."""
+    rows = conn.execute(
+        "SELECT DISTINCT state FROM articles WHERE analyzed = 1 AND state IS NOT NULL "
+        "AND state NOT IN ('nationwide', 'other') ORDER BY state"
+    ).fetchall()
+    return [r["state"] for r in rows]
+
+
+def _get_state_locations(conn):
+    """Build state -> locations map from config + database."""
+    config = load_config()
+    result = {}
+    # Start with configured locations
+    for state_key, state_cfg in config.get("priority_states", {}).items():
+        locs = list(state_cfg.get("locations", {}).keys()) + ["statewide"]
+        result[state_key] = locs
+    # Add any states in the DB that aren't in config
+    for state in _get_tracked_states(conn):
+        if state not in result:
+            # Query distinct locations for this state
+            rows = conn.execute(
+                "SELECT DISTINCT location_relevance FROM articles "
+                "WHERE analyzed = 1 AND state = ? AND location_relevance IS NOT NULL",
+                (state,),
+            ).fetchall()
+            locs = [r["location_relevance"] for r in rows if r["location_relevance"]]
+            if "statewide" not in locs:
+                locs.append("statewide")
+            result[state] = locs
+    return result
+
+
 def _get_wsi(conn):
     """Get WSI data for the report."""
     wsi = sentiment_index.compute_wsi(conn)
     comparison = sentiment_index.compute_period_comparison(conn)
     state_wsi = {}
-    for state in STATE_LOCATIONS:
+    for state in _get_tracked_states(conn):
         sw = sentiment_index.compute_wsi(conn, state=state)
         state_wsi[state] = sw.get("current_wsi")
     return {
@@ -96,7 +123,8 @@ def _get_trend(conn):
 def _get_locations(conn):
     """Get location sentiment for all tracked states."""
     result = {}
-    for state, locs in STATE_LOCATIONS.items():
+    state_locations = _get_state_locations(conn)
+    for state, locs in state_locations.items():
         for loc in locs:
             row = conn.execute(
                 "SELECT AVG(sentiment_score) as avg, COUNT(*) as count "

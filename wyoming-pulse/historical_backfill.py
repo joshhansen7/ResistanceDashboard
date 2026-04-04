@@ -111,7 +111,7 @@ def run_historical_backfill(start_date="2025-09-01", end_date=None,
 
     # Build query plan: (state_key, query_string) pairs
     queries = []
-    states_cfg = config.get("states", {})
+    states_cfg = config.get("priority_states", {})
     for state_key, state_cfg in states_cfg.items():
         if state and state_key != state:
             continue

@@ -17,10 +17,30 @@ CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 APIKEY_PATH = PROJECT_ROOT.parent / "apikey.txt"
 
 
+def normalize_config(config):
+    """
+    Handle backward compatibility between old and new config formats.
+    Old format: states + global_keywords
+    New format: priority_states + nationwide
+    """
+    if "nationwide" in config and "priority_states" in config:
+        return config
+    # Auto-migrate old format in memory
+    if "states" in config and "priority_states" not in config:
+        config["priority_states"] = config.pop("states")
+    if "global_keywords" in config and "nationwide" not in config:
+        config["nationwide"] = {
+            "keywords": config.pop("global_keywords"),
+            "web_search_queries": [],
+        }
+    return config
+
+
 def load_config():
-    """Load the YAML configuration file."""
+    """Load the YAML configuration file and normalize to current format."""
     with open(CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+    return normalize_config(config)
 
 
 def get_api_key():

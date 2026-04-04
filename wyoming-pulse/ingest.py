@@ -14,22 +14,27 @@ import feedparser
 import requests
 
 import db
+from geo import infer_state_from_text
 from shared import load_config, get_anthropic_client
 
 logger = logging.getLogger("wyoming_pulse.ingest")
 
 USER_AGENT = "PrometheusDashboard/1.0 (RSS Feed Reader; +https://github.com/prometheus-hyperscale)"
 
-RELEVANCE_PROMPT = """Score this article's relevance to data center development on a 1-10 scale.
+RELEVANCE_PROMPT = """Score this article's relevance to data center development in the United States on a 1-10 scale.
 
-Context: We track public sentiment toward data center projects across Wyoming, Texas, and Michigan for Prometheus Hyperscale.
+Context: We track public sentiment toward data center projects nationwide. Prometheus Hyperscale is a data center developer we track closely.
 
 Scoring guide:
-10: Directly about Prometheus Hyperscale or its projects
-8-9: About data center development/infrastructure in a tracked state (Wyoming, Texas, Michigan)
-6-7: About data center industry trends, energy policy, or grid impacts relevant to these states
-4-5: Tangentially related (general energy, tech industry, land use)
-1-3: Not relevant to data center development
+10: Directly about Prometheus Hyperscale, its leadership, or its projects
+9: Data center project news naming a specific company and location
+8: Explicitly about data center development, siting, bans, moratoriums, or community opposition in any US state
+7: About data center infrastructure, permitting, tax incentives, or utility/grid deals for data centers
+6: Data center industry trends, market analysis, or company expansions with specific locations
+5: General AI infrastructure or hyperscaler capital spending with data center implications
+4: General AI industry news or tech company strategy tangentially related to data centers
+3: Energy/grid policy or land use without specific data center connection
+1-2: No relevance to data centers (junk, unrelated local news, sports, etc.)
 
 Return ONLY a JSON object (no markdown fences, no preamble):
 {{"score": <int 1-10>, "reason": "<one sentence explanation>"}}
@@ -48,110 +53,71 @@ def normalize_text(text):
     return re.sub(r"\s+", " ", text.lower().strip())
 
 
-def _build_state_config(config, state_key):
-    """
-    Build a merged config for a specific state, combining state-specific
-    and global keywords/locations.
-    """
-    states = config.get("states", {})
-    state_cfg = states.get(state_key, {})
-    global_kw = config.get("global_keywords", {})
+# Short, precise list for company keyword co-occurrence filtering.
+# A company name must appear alongside one of these to match.
+TOPIC_SIGNALS = [
+    "data center", "data centre", "datacenter", "hyperscale",
+    "server farm", "colocation", "megawatt", "gigawatt",
+    "data hall", "compute", "AI infrastructure", "cooling",
+    "power capacity", "rack", "campus",
+]
 
-    # Merge keywords: state-specific + global
-    state_kw = state_cfg.get("keywords", {})
-    merged_keywords = {
-        "primary": state_kw.get("primary", []) + global_kw.get("primary", []),
-        "companies": state_kw.get("companies", []) + global_kw.get("companies", []),
-        "secondary": state_kw.get("secondary", []),
+
+def _build_keyword_set(config, state_key=None):
+    """
+    Build merged keyword lists from nationwide + optional priority_state.
+    Returns dict with primary, companies, secondary, and state_locations.
+    """
+    nationwide = config.get("nationwide", {}).get("keywords", {})
+    result = {
+        "primary": list(nationwide.get("primary", [])),
+        "companies": list(nationwide.get("companies", [])),
+        "secondary": list(nationwide.get("secondary", [])),
+        "state_locations": [],
     }
-
-    return {
-        "keywords": merged_keywords,
-        "locations": state_cfg.get("locations", {}),
-        "state_key": state_key,
-    }
-
-
-def check_keyword_match(title, summary, config, state_key=None):
-    """
-    Check if an article matches keyword filters.
-    If state_key is provided, uses that state's config.
-    Otherwise falls back to legacy config structure.
-    Returns (matched_keywords, score, matched_state) or (None, 0, None).
-    """
-    states = config.get("states", {})
-
-    # If a specific state is given, only check that state
     if state_key:
-        state_cfg = _build_state_config(config, state_key)
-        matched, score = _check_keywords_for_state(title, summary, state_cfg, state_key)
-        if matched:
-            return matched, score, state_key
-        return None, 0.0, None
-
-    # Otherwise, check all states — prefer states with location context
-    text = normalize_text(f"{title} {summary}")
-    best_match = None
-    for sk in states:
-        state_cfg = _build_state_config(config, sk)
-        matched, score = _check_keywords_for_state(title, summary, state_cfg, sk)
-        if matched:
-            # Check if this state has location context in the text
-            locs = state_cfg.get("locations", {})
-            all_loc_kw = [kw.lower() for loc_list in locs.values() for kw in loc_list] + [sk]
-            has_context = any(kw in text for kw in all_loc_kw)
-            if has_context:
-                return matched, score, sk
-            if best_match is None:
-                best_match = (matched, score, sk)
-    if best_match:
-        return best_match
-
-    # Legacy fallback: use top-level keywords/locations if present
-    if "keywords" in config:
-        legacy_cfg = {"keywords": config["keywords"], "locations": config.get("locations", {})}
-        matched, score = _check_keywords_for_state(title, summary, legacy_cfg, "wyoming")
-        if matched:
-            return matched, score, "wyoming"
-
-    return None, 0.0, None
+        state_cfg = config.get("priority_states", {}).get(state_key, {})
+        state_kw = state_cfg.get("keywords", {})
+        result["primary"].extend(state_kw.get("primary", []))
+        result["companies"].extend(state_kw.get("companies", []))
+        result["secondary"].extend(state_kw.get("secondary", []))
+        # Collect location keywords for state context checking
+        locs = state_cfg.get("locations", {})
+        for loc_list in locs.values():
+            result["state_locations"].extend([kw.lower() for kw in loc_list])
+        result["state_locations"].append(state_key)
+    return result
 
 
-def _check_keywords_for_state(title, summary, state_cfg, state_key):
-    """Check keywords for a single state config. Returns (matched, score)."""
-    keywords = state_cfg.get("keywords", {})
-    locations = state_cfg.get("locations", {})
-
-    text = normalize_text(f"{title} {summary}")
+def _match_keywords(text, keywords):
+    """
+    Match keywords against text using tiered logic.
+    Returns (matched_keywords_list, score) or (None, 0.0).
+    """
     matched = []
 
-    # Build state context from location keywords + state name
-    all_location_keywords = []
-    for loc_list in locations.values():
-        all_location_keywords.extend(loc_list)
-    location_pattern = [kw.lower() for kw in all_location_keywords]
-    state_context = [state_key] + location_pattern
-
-    has_state_context = any(ctx in text for ctx in state_context)
-
-    # Primary keywords — any single match = relevant (score 1.0)
-    for kw in keywords.get("primary", []):
+    # Tier 1: Primary keywords — any single match (score 1.0)
+    for kw in keywords["primary"]:
         if kw.lower() in text:
             matched.append(kw)
     if matched:
         return matched, 1.0
 
-    # Company keywords — require state context (score 0.8)
-    for kw in keywords.get("companies", []):
-        if kw.lower() in text and has_state_context:
+    # Context checks for lower tiers
+    has_state_context = any(loc in text for loc in keywords["state_locations"])
+    has_topic_signal = any(sig in text for sig in TOPIC_SIGNALS)
+
+    # Tier 2: Company keywords — require topic signal OR state context
+    for kw in keywords["companies"]:
+        if kw.lower() in text and (has_topic_signal or has_state_context):
             matched.append(kw)
     if matched:
-        return matched, 0.8
+        return matched, 0.9 if has_topic_signal else 0.8
 
-    # Secondary keywords — require co-occurrence with location or primary (score 0.6)
-    primary_present = any(kw.lower() in text for kw in keywords.get("primary", []))
-    for kw in keywords.get("secondary", []):
-        if kw.lower() in text and (has_state_context or primary_present):
+    # Tier 3: Secondary — require topic signal, company presence, or state context
+    company_present = any(kw.lower() in text for kw in keywords["companies"])
+    for kw in keywords["secondary"]:
+        if kw.lower() in text and (has_topic_signal or company_present or has_state_context):
             matched.append(kw)
     if matched:
         return matched, 0.6
@@ -159,12 +125,51 @@ def _check_keywords_for_state(title, summary, state_cfg, state_key):
     return None, 0.0
 
 
+def check_keyword_match(title, summary, config, state_key=None):
+    """
+    Check if an article is relevant and determine which state it belongs to.
+
+    Two separate concerns:
+      1. RELEVANCE — does the article match topic keywords? (nationwide + state-specific)
+      2. CATEGORIZATION — which state is it about? (priority state locations > text inference)
+
+    Returns (matched_keywords, score, matched_state) or (None, 0, None).
+    """
+    text = normalize_text(f"{title} {summary}")
+    keywords = _build_keyword_set(config, state_key)
+    matched, score = _match_keywords(text, keywords)
+
+    if not matched:
+        return None, 0.0, None
+
+    # Determine state
+    if state_key:
+        # Check if article actually mentions this state's locations
+        if any(loc in text for loc in keywords["state_locations"]):
+            return matched, score, state_key
+        # Infer from text, but default to the query state
+        inferred = infer_state_from_text(title, summary)
+        return matched, score, inferred or state_key
+
+    # No state hint — check priority state locations first
+    priority_states = config.get("priority_states", {})
+    for sk, st_cfg in priority_states.items():
+        locs = st_cfg.get("locations", {})
+        all_loc_kw = [kw.lower() for loc_list in locs.values() for kw in loc_list] + [sk]
+        if any(kw in text for kw in all_loc_kw):
+            return matched, score, sk
+
+    # Infer state from article text (handles all 50 states via geo.py)
+    inferred = infer_state_from_text(title, summary)
+    return matched, score, inferred
+
+
 def detect_location(title, summary, config, state_key=None):
     """Determine the geographic relevance of an article."""
     text = normalize_text(f"{title} {summary}")
 
     if state_key:
-        state_cfg = config.get("states", {}).get(state_key, {})
+        state_cfg = config.get("priority_states", {}).get(state_key, {})
         locations = state_cfg.get("locations", {})
     else:
         locations = config.get("locations", {})
@@ -249,6 +254,30 @@ def _score_relevance(client, model, article):
     return 5, "Scoring error"
 
 
+def score_relevance_hybrid(article, client=None, model=None):
+    """
+    Score relevance using local LLM first, falling back to Claude API.
+    Returns (score, reason) tuple.
+    """
+    try:
+        import local_llm
+        if local_llm.ensure_running():
+            score, reason = local_llm.score_relevance(
+                article.get("title", ""),
+                article.get("summary", ""),
+                article.get("source", ""),
+            )
+            return score, reason
+    except Exception as e:
+        logger.debug("Local LLM unavailable: %s", e)
+
+    # Fallback to Claude API
+    if client and model:
+        return _score_relevance(client, model, article)
+
+    return None, None
+
+
 def ingest_feeds(config=None, state=None):
     """
     Fetch all enabled RSS feeds, filter articles, score relevance,
@@ -270,7 +299,7 @@ def ingest_feeds(config=None, state=None):
 
     # Collect feeds from per-state configs
     all_feeds = []
-    states = config.get("states", {})
+    states = config.get("priority_states", {})
     for state_key, state_cfg in states.items():
         if state and state_key != state:
             continue
@@ -279,11 +308,11 @@ def ingest_feeds(config=None, state=None):
             feed_cfg["_state"] = state_key
             all_feeds.append(feed_cfg)
 
-    # Legacy fallback: top-level feeds
+    # Legacy fallback: top-level feeds (no state association — will be inferred from text)
     if not all_feeds and "feeds" in config:
         for feed_cfg in config["feeds"]:
             feed_cfg = dict(feed_cfg)
-            feed_cfg["_state"] = "wyoming"
+            feed_cfg["_state"] = None
             all_feeds.append(feed_cfg)
 
     total_found = 0
@@ -295,7 +324,7 @@ def ingest_feeds(config=None, state=None):
         name = feed_cfg.get("name", "Unknown")
         url = feed_cfg.get("url", "")
         enabled = feed_cfg.get("enabled", True)
-        feed_state = feed_cfg.get("_state", "wyoming")
+        feed_state = feed_cfg.get("_state")
 
         if not enabled or not url:
             logger.info("Skipping disabled/empty feed: %s", name)
@@ -335,7 +364,12 @@ def ingest_feeds(config=None, state=None):
                     feed_matched += 1
                     full_text = extract_content(entry)
                     pub_date = parse_published_date(entry)
-                    location = detect_location(title, summary, config, state_key=feed_state)
+
+                    # Determine final state: keyword match > feed state > text inference
+                    final_state = matched_state or feed_state
+                    if not final_state:
+                        final_state = infer_state_from_text(title, summary)
+                    location = detect_location(title, summary, config, state_key=final_state)
 
                     # Dedup: skip if URL already in articles or pending
                     if link:
@@ -351,15 +385,16 @@ def ingest_feeds(config=None, state=None):
                         if existing_pending:
                             continue
 
-                    # Score relevance
-                    rel_score = None
-                    rel_reason = None
-                    if client:
-                        rel_score, rel_reason = _score_relevance(client, relevance_model, {
-                            "title": title, "source": name,
-                            "published_date": pub_date, "summary": summary,
-                        })
-                        time.sleep(0.3)
+                    # Score relevance (local LLM first, Claude fallback)
+                    article_for_scoring = {
+                        "title": title, "source": name,
+                        "published_date": pub_date, "summary": summary,
+                    }
+                    rel_score, rel_reason = score_relevance_hybrid(
+                        article_for_scoring, client, relevance_model,
+                    )
+                    if rel_score is not None:
+                        time.sleep(0.1)  # Brief pause (local LLM is fast)
 
                     # Auto-approve if above threshold
                     if auto_threshold and rel_score and rel_score >= auto_threshold:
@@ -373,6 +408,8 @@ def ingest_feeds(config=None, state=None):
                             "summary": summary.strip()[:500] if summary else "",
                             "matched_keywords": matched_kw,
                             "keyword_score": score,
+                            "state": final_state,
+                            "location_relevance": location,
                         }
                         result = db.insert_article(conn, article_data)
                         if result is not None:
@@ -395,7 +432,7 @@ def ingest_feeds(config=None, state=None):
                         "relevance_score": rel_score,
                         "relevance_reason": rel_reason,
                         "source_type": "rss",
-                        "state": matched_state or feed_state,
+                        "state": final_state,
                     }
                     db.insert_pending_article(conn, pending_data)
                     total_new += 1

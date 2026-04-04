@@ -12,21 +12,23 @@ from utils import parse_json_response
 
 logger = logging.getLogger("wyoming_pulse.analyze")
 
-SYSTEM_PROMPT = """You are a sentiment analyst tracking public perception of data center development across the United States. You work for Prometheus Hyperscale, which has projects in Evanston and Casper, Wyoming and is expanding nationally.
+SYSTEM_PROMPT_TEMPLATE = """You are a sentiment analyst tracking public perception of data center development across the United States.
 
 Analyze the following article and return a JSON object (no markdown fences, no preamble) with these fields:
 
-{
+{{
   "sentiment_score": <float 1.0-5.0>,
   "sentiment_label": "<strongly_negative|slightly_negative|neutral|slightly_positive|strongly_positive>",
   "locations": [
-    {"state": "<lowercase state name>", "place": "<city, township, or county if applicable>", "relevance": "<primary|mentioned>"}
+    {{"state": "<lowercase state name>", "place": "<city, township, or county if applicable>", "relevance": "<primary|mentioned>"}}
   ],
-  "topic_tags": ["<from: energy_ratepayer, water, jobs_economic, land_use_wildlife, regulation_transparency, tax_incentives, national_security_ai, community_impact>"],
+  "topic_tags": ["<from: {topic_tags}>"],
   "entities_mentioned": ["<company or organization names>"],
   "key_claims": "<1-2 sentence summary of the most notable claims or narratives>",
   "sentiment_justification": "<1-2 sentences explaining why this specific score was assigned — cite the specific tone, framing, or quotes that drove the rating>"
-}
+}}
+
+{topic_descriptions}
 
 Geographic tagging rules for the "locations" array:
 - Each entry needs "state" (lowercase US state name), optional "place" (specific city/township/county), and "relevance" ("primary" or "mentioned")
@@ -37,23 +39,35 @@ Geographic tagging rules for the "locations" array:
 - If the article is about multiple states, include entries for each state
 - Use "nationwide" as state for federal/national scope with no single-state focus
 - Be specific with place names: prefer "Saline Township" over "Ann Arbor area" if the article names the township
+- DISAMBIGUATION: When a place name exists in multiple states (e.g., Evanston in WY vs IL, Springfield in many states, Portland in OR vs ME), use context clues to determine the correct state: nearby cities mentioned, state agencies referenced, regional references, news source geography.
 
-Sentiment scale:
-1.0 = Strongly negative (active opposition, calls for moratorium, fear-based)
-2.0 = Slightly negative (concern, skepticism, cautionary tone)
-3.0 = Neutral (factual reporting, balanced, no clear lean)
-4.0 = Slightly positive (cautious optimism, emphasis on benefits with caveats)
-5.0 = Strongly positive (enthusiastic support, boosterism, economic development framing)
+Sentiment scale — rate the TONE and FRAMING of the article, not the subject matter:
+1.0 = Strongly negative — article frames data centers as harmful, uses alarming language, amplifies opposition voices without counterpoint
+1.5 = Negative leaning strongly — predominantly critical framing with minimal balance
+2.0 = Slightly negative — cautionary tone, leads with concerns, skeptical framing
+2.5 = Negative leaning mildly — mostly balanced but tilts toward concerns
+3.0 = Neutral — factual reporting, balanced quotes from both sides, no editorial lean
+3.5 = Positive leaning mildly — mostly balanced but tilts toward benefits
+4.0 = Slightly positive — optimistic framing, leads with benefits, emphasizes opportunity
+4.5 = Positive leaning strongly — predominantly supportive with minimal caveats
+5.0 = Strongly positive — enthusiastic boosterism, promotional tone, uncritical support
 
-Be precise. A factual news article that quotes both supporters and opponents is neutral (3.0). An editorial urging caution is slightly negative (2.0). A county commissioner's enthusiastic endorsement is strongly positive (5.0)."""
+IMPORTANT: Score based on how the article is WRITTEN, not what it is ABOUT.
+- A neutral Reuters article reporting on a moratorium vote = 3.0 (neutral reporting)
+- An editorial arguing moratoriums are needed = 1.5 (advocacy against data centers)
+- An editorial arguing moratoriums are harmful = 4.5 (advocacy for data centers)
+- A press release announcing a new data center with only positive framing = 5.0
+- An investigative piece examining both economic benefits and environmental costs = 3.0
+- A community newspaper quoting angry residents with no industry response = 1.5"""
 
 
 def build_user_message(article):
     """Build the user message content for an article."""
     content = article["full_text"] or article["summary"] or ""
-    # Truncate to 3000 chars to control token usage
-    if len(content) > 3000:
-        content = content[:3000] + "..."
+    # Truncate to 8000 chars — enough for location/entity detection
+    # deeper in the article while keeping token costs reasonable
+    if len(content) > 8000:
+        content = content[:8000] + "..."
 
     return (
         f"Source: {article['source']}\n"
@@ -99,12 +113,32 @@ def parse_analysis_response(response_text):
         normalize_locations(locations)
         result["locations_json"] = locations
     else:
-        logger.warning("No location data in response")
-        return None
+        # No location data — default to nationwide (factors into national
+        # averages but not any specific state).
+        logger.info("No location data in response — defaulting to nationwide")
+        locations = [{"state": "nationwide", "relevance": "primary", "place": "nationwide"}]
+        result["locations_json"] = locations
+        result["state"] = "nationwide"
+        result["location_relevance"] = "nationwide"
 
     # Clamp sentiment score to valid range
     score = result.get("sentiment_score", 3.0)
     result["sentiment_score"] = max(1.0, min(5.0, float(score)))
+
+    # Normalize sentiment label to standard 5 categories based on score.
+    # The prompt allows half-point scores for granularity, but labels
+    # must stay in the standard set for dashboard compatibility.
+    s = result["sentiment_score"]
+    if s <= 1.5:
+        result["sentiment_label"] = "strongly_negative"
+    elif s <= 2.5:
+        result["sentiment_label"] = "slightly_negative"
+    elif s <= 3.5:
+        result["sentiment_label"] = "neutral"
+    elif s <= 4.5:
+        result["sentiment_label"] = "slightly_positive"
+    else:
+        result["sentiment_label"] = "strongly_positive"
 
     # Ensure list fields are lists
     for list_field in ("topic_tags", "entities_mentioned"):
@@ -114,10 +148,13 @@ def parse_analysis_response(response_text):
     return result
 
 
-def analyze_articles(config=None, limit=20):
+def analyze_articles(config=None, limit=None, progress_callback=None):
     """
     Analyze unanalyzed articles using Claude API.
     Returns dict with summary statistics.
+    If limit is None, all unanalyzed articles are processed.
+    If progress_callback is provided, it is called as progress_callback(current, total)
+    after each article is processed.
     """
     if config is None:
         config = load_config()
@@ -130,6 +167,25 @@ def analyze_articles(config=None, limit=20):
     model = api_config.get("classification_model", "claude-haiku-4-5-20251001")
     max_retries = api_config.get("max_retries", 3)
     timeout = api_config.get("timeout_seconds", 30)
+
+    # Build topic list and descriptions from config
+    topics = config.get("topics", [])
+    if topics:
+        topic_keys = [t["key"] for t in topics]
+        topic_tags_str = ", ".join(topic_keys)
+        desc_lines = ["Topic descriptions:"] + [
+            f"- {t['key']}: {t['description']}" for t in topics
+        ]
+        topic_descriptions_str = "\n".join(desc_lines)
+    else:
+        # Fallback if no topics in config
+        topic_tags_str = "energy_ratepayer, water, jobs_economic, land_use_wildlife, regulation_transparency, tax_incentives, national_security_ai, community_impact"
+        topic_descriptions_str = ""
+
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        topic_tags=topic_tags_str,
+        topic_descriptions=topic_descriptions_str,
+    )
 
     conn = db.get_connection()
     articles = db.get_unanalyzed_articles(conn, limit=limit)
@@ -145,7 +201,8 @@ def analyze_articles(config=None, limit=20):
     total_input_tokens = 0
     total_output_tokens = 0
 
-    for article in articles:
+    total = len(articles)
+    for idx, article in enumerate(articles):
         article_id = article["id"]
         title = article["title"]
         logger.info("Analyzing: %s", title[:60])
@@ -158,7 +215,7 @@ def analyze_articles(config=None, limit=20):
                     model=model,
                     max_tokens=600,
                     timeout=timeout,
-                    system=SYSTEM_PROMPT,
+                    system=system_prompt,
                     messages=[{"role": "user", "content": user_msg}],
                 )
 
@@ -191,6 +248,10 @@ def analyze_articles(config=None, limit=20):
                     time.sleep(2 ** attempt)
                 else:
                     error_count += 1
+
+        # Report progress after each article
+        if progress_callback is not None:
+            progress_callback(idx + 1, total)
 
         # Brief pause between API calls
         time.sleep(0.5)

@@ -80,12 +80,25 @@ CREATE TABLE IF NOT EXISTS pending_articles (
     status TEXT DEFAULT 'pending'
 );
 
+CREATE TABLE IF NOT EXISTS article_states (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_id INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    place TEXT,
+    relevance TEXT DEFAULT 'primary',
+    county_fips TEXT,
+    county_name TEXT,
+    FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_articles_analyzed ON articles(analyzed);
 CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published_date);
 CREATE INDEX IF NOT EXISTS idx_articles_source ON articles(source);
 CREATE INDEX IF NOT EXISTS idx_articles_sentiment ON articles(sentiment_label);
 CREATE INDEX IF NOT EXISTS idx_pending_search ON pending_articles(search_id);
 CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_articles(status);
+CREATE INDEX IF NOT EXISTS idx_article_states_state ON article_states(state);
+CREATE INDEX IF NOT EXISTS idx_article_states_article ON article_states(article_id);
 """
 
 
@@ -110,8 +123,9 @@ def init_db(db_path=None):
             logger.info("Migrated: added sentiment_justification column")
         if "state" not in cols:
             conn.execute("ALTER TABLE articles ADD COLUMN state TEXT")
-            conn.execute("UPDATE articles SET state = 'wyoming' WHERE state IS NULL")
-            logger.info("Migrated: added state column, defaulted existing records to wyoming")
+            # Leave state NULL for pre-existing articles rather than assuming a state;
+            # they will be categorized when re-analyzed or can be manually assigned.
+            logger.info("Migrated: added state column (existing records have state=NULL)")
         # Migrate: add source_type and state columns to pending_articles
         pending_cols = [r[1] for r in conn.execute("PRAGMA table_info(pending_articles)").fetchall()]
         if "source_type" not in pending_cols:
@@ -139,6 +153,38 @@ def init_db(db_path=None):
                     (json.dumps([entry]), r["id"]),
                 )
             logger.info("Backfilled locations_json for %d articles", len(rows))
+        # Migrate: backfill article_states junction table if empty
+        has_states = conn.execute(
+            "SELECT COUNT(*) as c FROM article_states"
+        ).fetchone()["c"]
+        if has_states == 0:
+            analyzed_with_locs = conn.execute(
+                "SELECT id, locations_json FROM articles "
+                "WHERE analyzed = 1 AND locations_json IS NOT NULL"
+            ).fetchall()
+            for r in analyzed_with_locs:
+                try:
+                    locs = json.loads(r["locations_json"])
+                    _sync_article_states(conn, r["id"], locs)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            if analyzed_with_locs:
+                logger.info("Backfilled article_states for %d articles", len(analyzed_with_locs))
+
+        # Migrate: add content_quality column to track scrape completeness
+        if "content_quality" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN content_quality TEXT")
+            logger.info("Migrated: added content_quality column")
+            # Backfill based on current full_text length
+            conn.execute("""
+                UPDATE articles SET content_quality = CASE
+                    WHEN full_text IS NULL OR LENGTH(full_text) < 200 THEN 'thin'
+                    ELSE 'full'
+                END
+                WHERE content_quality IS NULL
+            """)
+            logger.info("Backfilled content_quality for existing articles")
+
         conn.commit()
         logger.info("Database initialized at %s", db_path or DB_PATH)
     finally:
@@ -150,11 +196,15 @@ def insert_article(conn, article_data):
     Insert a new article into the database.
     Returns the row id on success, None if the article already exists (duplicate URL).
     """
+    full_text = article_data.get("full_text")
+    content_quality = "full" if full_text and len(full_text) >= 200 else "thin"
+
     sql = """
     INSERT OR IGNORE INTO articles
         (source, source_type, title, url, published_date, ingested_date,
-         full_text, summary, matched_keywords, keyword_score)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         full_text, summary, matched_keywords, keyword_score,
+         state, location_relevance, content_quality)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     now = datetime.utcnow().isoformat()
     params = (
@@ -164,10 +214,13 @@ def insert_article(conn, article_data):
         article_data.get("url"),
         article_data.get("published_date"),
         now,
-        article_data.get("full_text"),
+        full_text,
         article_data.get("summary"),
         json.dumps(article_data.get("matched_keywords", [])),
         article_data.get("keyword_score", 0.0),
+        article_data.get("state"),
+        article_data.get("location_relevance"),
+        content_quality,
     )
     cursor = conn.execute(sql, params)
     if cursor.rowcount > 0:
@@ -179,7 +232,16 @@ def insert_article(conn, article_data):
 
 
 def get_unanalyzed_articles(conn, limit=20):
-    """Get articles that haven't been analyzed yet."""
+    """Get articles that haven't been analyzed yet.
+    If limit is None, return all unanalyzed articles.
+    """
+    if limit is None:
+        sql = """
+        SELECT * FROM articles
+        WHERE analyzed = 0
+        ORDER BY ingested_date ASC
+        """
+        return conn.execute(sql).fetchall()
     sql = """
     SELECT * FROM articles
     WHERE analyzed = 0
@@ -232,7 +294,46 @@ def update_article_analysis(conn, article_id, analysis):
         article_id,
     )
     conn.execute(sql, params)
+
+    # Populate article_states junction table for multi-state queries
+    _sync_article_states(conn, article_id, locations_json)
+
     conn.commit()
+
+
+def _sync_article_states(conn, article_id, locations):
+    """Sync the article_states junction table from a locations list."""
+    conn.execute("DELETE FROM article_states WHERE article_id = ?", (article_id,))
+    if not locations or not isinstance(locations, list):
+        return
+    for loc in locations:
+        state = loc.get("state")
+        if not state:
+            continue
+        conn.execute(
+            """INSERT INTO article_states (article_id, state, place, relevance, county_fips, county_name)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (article_id, state, loc.get("place"), loc.get("relevance", "primary"),
+             loc.get("county_fips"), loc.get("county_name")),
+        )
+
+
+def backfill_article_states(conn):
+    """Backfill article_states from existing locations_json for all analyzed articles."""
+    rows = conn.execute(
+        "SELECT id, locations_json FROM articles WHERE analyzed = 1 AND locations_json IS NOT NULL"
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        try:
+            locs = json.loads(row["locations_json"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        _sync_article_states(conn, row["id"], locs)
+        updated += 1
+    conn.commit()
+    logger.info("Backfilled article_states for %d articles", updated)
+    return updated
 
 
 def get_articles_for_digest(conn, start_date, end_date):
@@ -424,7 +525,7 @@ def approve_pending_articles(conn, article_ids):
 
         article_data = {
             "source": row["source"],
-            "source_type": "websearch",
+            "source_type": row["source_type"] if "source_type" in row.keys() else "websearch",
             "title": row["title"],
             "url": row["url"],
             "published_date": row["published_date"],
@@ -432,6 +533,8 @@ def approve_pending_articles(conn, article_ids):
             "summary": row["summary"],
             "matched_keywords": json.loads(row["matched_keywords"]) if row["matched_keywords"] else [],
             "keyword_score": row["keyword_score"],
+            "state": row["state"] if "state" in row.keys() else None,
+            "location_relevance": row["location_relevance"] if "location_relevance" in row.keys() else None,
         }
         result = insert_article(conn, article_data)
         if result:

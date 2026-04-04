@@ -19,7 +19,7 @@ OUTPUT_DIR = Path(__file__).parent / "output" / "digests"
 
 SYNTHESIS_PROMPT = """You are an intelligence analyst producing a biweekly sentiment report about data center development across the United States for Prometheus Hyperscale leadership.
 
-States currently tracked: Wyoming (Evanston, Casper, Cheyenne), Texas (Dallas), Michigan (Ann Arbor, Van Buren/Wayne County, Benton Harbor/Berrien County).
+{states_summary}
 
 Given the following classified articles and aggregate data from the past {days} days, produce a concise intelligence digest. Be analytical and objective. Distinguish between signals and noise. Flag anything that represents a meaningful shift from baseline.
 
@@ -182,7 +182,24 @@ def build_synthesis_input(articles, stats, days, tracked_states=None):
     return "\n".join(lines)
 
 
-def generate_digest_with_api(synthesis_input, days, config):
+def _build_states_summary(config, tracked_states):
+    """Build a dynamic 'States currently tracked' line from config + database."""
+    parts = []
+    states_cfg = config.get("priority_states", {})
+    for sk in tracked_states:
+        locs = states_cfg.get(sk, {}).get("locations", {})
+        name = sk.title()
+        if locs:
+            loc_names = [k.replace("_", " ").title() for k in locs]
+            parts.append(f"{name} ({', '.join(loc_names)})")
+        else:
+            parts.append(name)
+    if parts:
+        return "States currently tracked: " + ", ".join(parts) + "."
+    return "No state-specific tracking configured; analyzing articles from all US states."
+
+
+def generate_digest_with_api(synthesis_input, days, config, tracked_states=None):
     """Use Claude Sonnet to generate the digest narrative."""
     api_key = get_api_key()
     if not api_key:
@@ -196,8 +213,9 @@ def generate_digest_with_api(synthesis_input, days, config):
     api_config = config.get("anthropic", {})
     model = api_config.get("synthesis_model", "claude-sonnet-4-5-20241022")
 
+    states_summary = _build_states_summary(config, tracked_states or [])
     client = anthropic.Anthropic(api_key=api_key)
-    prompt = SYNTHESIS_PROMPT.format(days=days)
+    prompt = SYNTHESIS_PROMPT.format(days=days, states_summary=states_summary)
 
     try:
         response = client.messages.create(
@@ -325,7 +343,7 @@ def generate_digest(start_date=None, end_date=None, config=None):
     # Try API synthesis first, fall back to template
     days = (datetime.fromisoformat(end_date) - datetime.fromisoformat(start_date)).days
     synthesis_input = build_synthesis_input(article_list, stats, days, tracked_states=tracked_states)
-    narrative, api_error = generate_digest_with_api(synthesis_input, days, config)
+    narrative, api_error = generate_digest_with_api(synthesis_input, days, config, tracked_states=tracked_states)
 
     if narrative:
         wsi_str = f"**WSI:** {stats.get('wsi_overall', 0):.2f}/5.0\n" if stats.get("wsi_overall") else ""

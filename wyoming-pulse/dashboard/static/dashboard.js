@@ -20,15 +20,11 @@ async function getStates() {
     return _statesCache;
 }
 
+const _STATE_ABBR = {"alabama":"AL","alaska":"AK","arizona":"AZ","arkansas":"AR","california":"CA","colorado":"CO","connecticut":"CT","delaware":"DE","florida":"FL","georgia":"GA","hawaii":"HI","idaho":"ID","illinois":"IL","indiana":"IN","iowa":"IA","kansas":"KS","kentucky":"KY","louisiana":"LA","maine":"ME","maryland":"MD","massachusetts":"MA","michigan":"MI","minnesota":"MN","mississippi":"MS","missouri":"MO","montana":"MT","nebraska":"NE","nevada":"NV","new hampshire":"NH","new jersey":"NJ","new mexico":"NM","new york":"NY","north carolina":"NC","north dakota":"ND","ohio":"OH","oklahoma":"OK","oregon":"OR","pennsylvania":"PA","rhode island":"RI","south carolina":"SC","south dakota":"SD","tennessee":"TN","texas":"TX","utah":"UT","vermont":"VT","virginia":"VA","washington":"WA","west virginia":"WV","wisconsin":"WI","wyoming":"WY","district of columbia":"DC","nationwide":"US"};
+
 function getStateAbbr(stateKey) {
     if (!stateKey) return '--';
-    if (_statesCache) {
-        const s = _statesCache.find(s => s.key === stateKey);
-        if (s) return s.abbr;
-    }
-    // Fallback for special values
-    if (stateKey === 'nationwide') return 'US';
-    return stateKey.toUpperCase().substring(0, 2);
+    return _STATE_ABBR[stateKey.toLowerCase()] || stateKey.toUpperCase().substring(0, 2);
 }
 
 function getStateName(stateKey) {
@@ -46,6 +42,25 @@ function getStateFips(stateKey) {
         if (s) return s.fips;
     }
     return null;
+}
+
+function buildStateOptions(selected) {
+    // Build <option> list for all states known to the dashboard.
+    // Uses the cached states from /api/states (loaded at init), plus fixed entries.
+    let html = '';
+    if (_statesCache) {
+        _statesCache.forEach(s => {
+            html += `<option value="${s.key}" ${s.key === selected ? 'selected' : ''}>${s.name}</option>`;
+        });
+    }
+    // Ensure the current value is always present (even if not in cache yet)
+    if (selected && selected !== 'nationwide' && selected !== 'other'
+        && _statesCache && !_statesCache.find(s => s.key === selected)) {
+        html += `<option value="${selected}" selected>${capitalize(selected)}</option>`;
+    }
+    html += `<option value="nationwide" ${selected === 'nationwide' ? 'selected' : ''}>Nationwide</option>`;
+    html += `<option value="other" ${selected === 'other' ? 'selected' : ''}>Other</option>`;
+    return html;
 }
 
 async function populateStateDropdown(selectId, includeAll = true, includeNationwide = false) {
@@ -637,16 +652,36 @@ function applyMetrics(overview, wsiData) {
         wsiEl.style.color = sentimentColor(wsiData.current_wsi);
     } else { wsiEl.textContent = '--'; }
 
-    const trendEl = document.getElementById('metricTrend');
-    const pc = wsiData.period_comparison;
-    if (pc && pc.change !== null) {
-        const arrow = pc.direction === 'improving' ? '\u25B2' : pc.direction === 'declining' ? '\u25BC' : '\u25C6';
-        const color = pc.direction === 'improving' ? 'var(--sent-5)' : pc.direction === 'declining' ? 'var(--sent-1)' : 'var(--sent-3)';
-        trendEl.textContent = `${arrow} ${pc.change > 0 ? '+' : ''}${pc.change.toFixed(2)}`;
-        trendEl.style.color = color;
-    } else { trendEl.textContent = '--'; }
+    renderSentDistBar(overview.sentiment_distribution);
 
     document.getElementById('lastSync').textContent = overview.last_ingestion ? timeAgo(overview.last_ingestion) : '--';
+}
+
+function renderSentDistBar(dist) {
+    const container = document.getElementById('sentDistBar');
+    if (!container) return;
+    const bar = container.querySelector('.sent-dist-bar');
+    const labels = container.querySelector('.sent-dist-labels');
+    if (!dist) { bar.innerHTML = ''; labels.innerHTML = ''; return; }
+
+    const keys = ['strongly_negative', 'slightly_negative', 'neutral', 'slightly_positive', 'strongly_positive'];
+    const colors = ['var(--sent-1)', 'var(--sent-2)', 'var(--sent-3)', 'var(--sent-4)', 'var(--sent-5)'];
+    const abbr = ['V.NEG', 'NEG', 'NEU', 'POS', 'V.POS'];
+    const total = keys.reduce((s, k) => s + (dist[k] || 0), 0);
+
+    if (total === 0) { bar.innerHTML = ''; labels.innerHTML = ''; return; }
+
+    bar.innerHTML = keys.map((k, i) => {
+        const pct = ((dist[k] || 0) / total) * 100;
+        if (pct === 0) return '';
+        return `<span style="width:${pct}%;background:${colors[i]}" title="${abbr[i]}: ${dist[k]}"></span>`;
+    }).join('');
+
+    labels.innerHTML = keys.map((k, i) => {
+        const count = dist[k] || 0;
+        if (count === 0) return '';
+        return `<span style="color:${colors[i]}">${abbr[i]} ${count}</span>`;
+    }).join('');
 }
 
 async function updateMetrics(qs) {
@@ -656,6 +691,8 @@ async function updateMetrics(qs) {
             fetchJSON(`/api/sentiment-index${qs}`),
         ]);
         applyMetrics(overview, wsiData);
+        renderWSITrendChart(wsiData.trend);
+        renderPeriodComparison(wsiData.period_comparison);
     } catch (err) { console.error('Metrics update error:', err); }
 }
 
@@ -1285,7 +1322,7 @@ async function renderArticles(append = false) {
             const entities = (a.entities_mentioned || []).map(e => `<span class="pill pill-entity">${escapeHtml(e)}</span>`).join(' ');
             return `
                 <tr style="cursor:pointer" onclick="toggleExpand(${idx})">
-                    <td class="text-cell">${escapeHtml(titleTrunc)}</td>
+                    <td class="text-cell"><span onclick="event.stopPropagation();showArticleDetail(${a.id})" style="cursor:pointer;color:var(--accent)">${escapeHtml(titleTrunc)}</span></td>
                     <td>${escapeHtml(a.source || '')}</td>
                     <td>${fmtDate(a.published_date)}</td>
                     <td><span class="pill ${sentimentPillClass(a.sentiment_label)}">${sentimentLabel(a.sentiment_label)}</span></td>
@@ -1314,11 +1351,7 @@ async function renderArticles(append = false) {
                                     <div class="article-detail-label">STATE</div>
                                     <div class="article-detail-field">
                                         <select class="detail-select" data-field="state" onchange="onDetailStateChange(this); markArticleDirty(this)">
-                                            <option value="wyoming" ${a.state==='wyoming'?'selected':''}>Wyoming</option>
-                                            <option value="texas" ${a.state==='texas'?'selected':''}>Texas</option>
-                                            <option value="michigan" ${a.state==='michigan'?'selected':''}>Michigan</option>
-                                            <option value="nationwide" ${a.state==='nationwide'?'selected':''}>Nationwide</option>
-                                            <option value="other" ${a.state==='other'?'selected':''}>Other</option>
+                                            ${buildStateOptions(a.state)}
                                         </select>
                                     </div>
                                 </div>
@@ -1368,18 +1401,35 @@ async function renderArticles(append = false) {
     } catch (err) { console.error('Articles error:', err); }
 }
 
-const REGION_OPTIONS = {
-    wyoming:  [['statewide','Statewide'],['evanston','Evanston'],['casper','Casper'],['cheyenne','Cheyenne']],
-    texas:    [['statewide','TX Statewide'],['dallas','Dallas']],
-    michigan: [['statewide','MI Statewide'],['ann_arbor','Ann Arbor'],['van_buren','Van Buren'],['benton_harbor','Benton Harbor']],
-    nationwide: [['nationwide','Nationwide']],
-    other:   [['other','Other']],
-};
+// Region options derived from config; states not listed get a generic "Statewide" entry.
+// This is populated dynamically from /api/state-locations if available,
+// but we keep a small seed for configured states.
+let _regionOptionsCache = null;
+
+async function _loadRegionOptions() {
+    if (_regionOptionsCache) return _regionOptionsCache;
+    try {
+        const resp = await fetchJSON('/api/state-locations');
+        _regionOptionsCache = resp.locations || {};
+    } catch {
+        _regionOptionsCache = {};
+    }
+    return _regionOptionsCache;
+}
 
 function regionOptions(state, selected) {
-    const opts = REGION_OPTIONS[state] || REGION_OPTIONS.other;
+    if (state === 'nationwide') {
+        return `<option value="nationwide" ${selected === 'nationwide' ? 'selected' : ''}>Nationwide</option>`;
+    }
+    // Build options: always include statewide, plus any configured locations
+    const locs = (_regionOptionsCache && _regionOptionsCache[state]) || [];
+    let opts = [['statewide', 'Statewide'], ...locs];
+    // Ensure the currently selected value is present
+    if (selected && selected !== 'statewide' && !opts.find(([v]) => v === selected)) {
+        opts.push([selected, capitalize(selected.replace(/_/g, ' '))]);
+    }
     return opts.map(([val, label]) =>
-        `<option value="${val}" ${val===selected?'selected':''}>${label}</option>`
+        `<option value="${val}" ${val === selected ? 'selected' : ''}>${label}</option>`
     ).join('');
 }
 
@@ -1540,6 +1590,9 @@ async function renderSystem() {
             <div class="kv-item"><span class="kv-label">Feeds</span><span class="kv-val">${feedData.feeds ? feedData.feeds.length : 0}</span></div>
         `;
 
+        // Config/Keywords section
+        renderConfigSection();
+
     } catch (err) { console.error('System error:', err); }
 }
 
@@ -1561,6 +1614,82 @@ function exportReport() { window.location.href = '/api/export'; }
 //  PAGE 5: CONTROL
 // ══════════════════════════════════════════════
 let _pollTimers = {};
+let _queueArticles = [];
+let _queueSort = { key: 'relevance_score', dir: 'desc' };
+
+function sortQueueArticles() {
+    const { key, dir } = _queueSort;
+    _queueArticles.sort((a, b) => {
+        let va = a[key], vb = b[key];
+        if (va == null) va = '';
+        if (vb == null) vb = '';
+        if (typeof va === 'number' && typeof vb === 'number') return dir === 'asc' ? va - vb : vb - va;
+        va = String(va).toLowerCase();
+        vb = String(vb).toLowerCase();
+        return dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+    });
+}
+
+function onQueueSort(key) {
+    if (_queueSort.key === key) {
+        _queueSort.dir = _queueSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+        _queueSort.key = key;
+        _queueSort.dir = key === 'title' || key === 'source' || key === 'state' ? 'asc' : 'desc';
+    }
+    sortQueueArticles();
+    renderQueueRows();
+    updateQueueSortIndicators();
+}
+
+function updateQueueSortIndicators() {
+    document.querySelectorAll('#queueTable th[data-sort]').forEach(th => {
+        const key = th.dataset.sort;
+        const arrow = th.querySelector('.sort-arrow');
+        if (arrow) {
+            if (key === _queueSort.key) {
+                arrow.textContent = _queueSort.dir === 'asc' ? ' \u25B2' : ' \u25BC';
+                arrow.style.opacity = '1';
+            } else {
+                arrow.textContent = ' \u25B2';
+                arrow.style.opacity = '0.25';
+            }
+        }
+    });
+}
+
+function renderQueueRows() {
+    const tbody = document.getElementById('queueBody');
+    tbody.innerHTML = _queueArticles.map(a => {
+        const hasScore = a.relevance_score !== null && a.relevance_score !== undefined;
+        const scoreCls = !hasScore ? 'rel-none' : a.relevance_score >= 8 ? 'rel-high' : a.relevance_score >= 5 ? 'rel-mid' : 'rel-low';
+        const scoreText = hasScore ? a.relevance_score : '\u2014';
+        const titleTrunc = a.title && a.title.length > 55 ? a.title.substring(0, 52) + '...' : (a.title || '--');
+        const stateAbbr = getStateAbbr(a.state);
+        const typeCls = a.source_type === 'rss' ? 'pill-rss' : 'pill-web';
+        const typeLabel = a.source_type === 'rss' ? 'RSS' : 'WEB';
+        const preChecked = hasScore && a.relevance_score >= 7;
+        const reason = a.relevance_reason || '';
+        const summary = a.summary ? escapeHtml(a.summary) : '<span style="color:var(--text-muted)">No summary</span>';
+        return `<tr style="cursor:pointer" onclick="togglePendingExpand(${a.id}, event)">
+            <td><input type="checkbox" class="queue-check" data-id="${a.id}" ${preChecked ? 'checked' : ''} onchange="updateQueueSelectedCount()" onclick="event.stopPropagation()"></td>
+            <td><span class="relevance-score ${scoreCls}">${scoreText}</span></td>
+            <td class="text-cell" title="${escapeHtml(a.title)}"><a href="${escapeHtml(a.url || '#')}" target="_blank" rel="noopener" class="article-link" onclick="event.stopPropagation()">${escapeHtml(titleTrunc)}</a></td>
+            <td>${escapeHtml(a.source || '')}</td>
+            <td>${stateAbbr ? `<span class="pill pill-state">${stateAbbr}</span>` : '--'}</td>
+            <td>${fmtDate(a.published_date)}</td>
+            <td><span class="pill ${typeCls}">${typeLabel}</span></td>
+        </tr>
+        <tr class="expand-row hidden" id="pending-expand-${a.id}">
+            <td colspan="7" class="pending-detail">
+                ${reason ? `<div class="pending-detail-reason"><strong>Relevance:</strong> ${escapeHtml(reason)}</div>` : ''}
+                <div class="pending-detail-summary">${summary}</div>
+                ${a.url ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" class="article-link" style="font-size:10px;word-break:break-all">${escapeHtml(a.url)}</a>` : ''}
+            </td>
+        </tr>`;
+    }).join('');
+    updateQueueSelectedCount();
+}
 
 async function renderReviewQueue() {
     const table = document.getElementById('queueTable');
@@ -1594,35 +1723,10 @@ async function renderReviewQueue() {
         document.getElementById('queueTotal').textContent = articles.length;
         document.getElementById('queueSelectAll').checked = false;
 
-        tbody.innerHTML = articles.map(a => {
-            const hasScore = a.relevance_score !== null && a.relevance_score !== undefined;
-            const scoreCls = !hasScore ? 'rel-none' : a.relevance_score >= 8 ? 'rel-high' : a.relevance_score >= 5 ? 'rel-mid' : 'rel-low';
-            const scoreText = hasScore ? a.relevance_score : '\u2014';
-            const titleTrunc = a.title && a.title.length > 55 ? a.title.substring(0, 52) + '...' : (a.title || '--');
-            const stateAbbr = getStateAbbr(a.state);
-            const typeCls = a.source_type === 'rss' ? 'pill-rss' : 'pill-web';
-            const typeLabel = a.source_type === 'rss' ? 'RSS' : 'WEB';
-            const preChecked = hasScore && a.relevance_score >= 7;
-            const reason = a.relevance_reason || '';
-            const summary = a.summary ? escapeHtml(a.summary) : '<span style="color:var(--text-muted)">No summary</span>';
-            return `<tr style="cursor:pointer" onclick="togglePendingExpand(${a.id}, event)">
-                <td><input type="checkbox" class="queue-check" data-id="${a.id}" ${preChecked ? 'checked' : ''} onchange="updateQueueSelectedCount()" onclick="event.stopPropagation()"></td>
-                <td><span class="relevance-score ${scoreCls}">${scoreText}</span></td>
-                <td class="text-cell" title="${escapeHtml(a.title)}"><a href="${escapeHtml(a.url || '#')}" target="_blank" rel="noopener" class="article-link" onclick="event.stopPropagation()">${escapeHtml(titleTrunc)}</a></td>
-                <td>${escapeHtml(a.source || '')}</td>
-                <td>${stateAbbr ? `<span class="pill pill-state">${stateAbbr}</span>` : '--'}</td>
-                <td>${fmtDate(a.published_date)}</td>
-                <td><span class="pill ${typeCls}">${typeLabel}</span></td>
-            </tr>
-            <tr class="expand-row hidden" id="pending-expand-${a.id}">
-                <td colspan="7" class="pending-detail">
-                    ${reason ? `<div class="pending-detail-reason"><strong>Relevance:</strong> ${escapeHtml(reason)}</div>` : ''}
-                    <div class="pending-detail-summary">${summary}</div>
-                    ${a.url ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" class="article-link" style="font-size:10px;word-break:break-all">${escapeHtml(a.url)}</a>` : ''}
-                </td>
-            </tr>`;
-        }).join('');
-        updateQueueSelectedCount();
+        _queueArticles = articles;
+        sortQueueArticles();
+        renderQueueRows();
+        updateQueueSortIndicators();
     } catch (err) { console.error('Review queue error:', err); }
 }
 
@@ -1889,7 +1993,11 @@ function pollTask(taskId, type, btnId, statusId) {
             const data = await fetchJSON(`/api/control/task/${taskId}`);
 
             if (data.status === 'running') {
-                status.innerHTML = `<span class="task-running">Running... (${elapsed}s)</span>`;
+                let msg = `Running... (${elapsed}s)`;
+                if (data.progress && data.progress.total) {
+                    msg = `Analyzing ${data.progress.current} / ${data.progress.total}... (${elapsed}s)`;
+                }
+                status.innerHTML = `<span class="task-running">${msg}</span>`;
             } else if (data.status === 'completed') {
                 clearInterval(_pollTimers[type]);
                 _pollTimers[type] = null;
@@ -2007,8 +2115,160 @@ function togglePendingExpand(id, event) {
     if (row) row.classList.toggle('hidden');
 }
 
+// ══════════════════════════════════════════════
+//  ARTICLE DETAIL PAGE
+// ══════════════════════════════════════════════
+
+async function showArticleDetail(articleId) {
+    // Switch to the article detail page
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById('page-article-detail').classList.add('active');
+    document.getElementById('articleDetailTitle').textContent = 'Loading...';
+    document.getElementById('articleDetailContent').innerHTML = '';
+
+    try {
+        const data = await fetchJSON(`/api/article/${articleId}`);
+        document.getElementById('articleDetailTitle').textContent = 'ARTICLE DETAIL';
+
+        const sentClass = sentimentPillClass(data.sentiment_label);
+        const sentText = sentimentLabel(data.sentiment_label);
+        const scoreText = data.sentiment_score != null ? data.sentiment_score.toFixed(1) : '--';
+
+        // Build states section
+        const statesHtml = (data.state_details && data.state_details.length > 0)
+            ? data.state_details.map(s => {
+                const abbr = getStateAbbr(s.state);
+                const place = s.place ? escapeHtml(s.place) : 'Statewide';
+                const county = s.county_name ? ` (${escapeHtml(s.county_name)})` : '';
+                const rel = s.relevance === 'mentioned' ? ' <span style="color:var(--muted)">[mentioned]</span>' : '';
+                return `<span class="state-card"><span class="state-name">${abbr}</span> ${place}${county}${rel}</span>`;
+            }).join('')
+            : (data.state ? `<span class="state-card"><span class="state-name">${getStateAbbr(data.state)}</span></span>` : '<span style="color:var(--muted)">Not categorized</span>');
+
+        const topicsHtml = (data.topic_tags || []).map(t => `<span class="pill pill-topic">${topicDisplay(t)}</span>`).join(' ') || '<span style="color:var(--muted)">None</span>';
+        const entitiesHtml = (data.entities_mentioned || []).map(e => `<span class="pill pill-entity">${escapeHtml(e)}</span>`).join(' ') || '<span style="color:var(--muted)">None</span>';
+
+        const content = data.full_text || data.summary || '';
+        const contentPreview = content.length > 2000 ? content.substring(0, 2000) + '...' : content;
+
+        document.getElementById('articleDetailContent').innerHTML = `
+            <div class="article-detail-page">
+                <h2 style="color:var(--text);font-size:1.1rem;margin-bottom:4px">${escapeHtml(data.title)}</h2>
+                <div class="meta-row">
+                    ${escapeHtml(data.source || '')} &middot; ${fmtDate(data.published_date)} &middot; ${escapeHtml(data.source_type || '')}
+                    ${data.url ? ` &middot; <a href="${data.url}" target="_blank" rel="noopener" style="color:var(--accent)">Open article &rarr;</a>` : ''}
+                </div>
+
+                <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:20px">
+                    <div class="detail-section">
+                        <h3>Sentiment</h3>
+                        <span class="pill ${sentClass}" style="font-size:0.85rem">${sentText}</span>
+                        <span style="color:var(--text);margin-left:8px;font-weight:600">${scoreText} / 5.0</span>
+                    </div>
+                </div>
+
+                <div class="detail-section">
+                    <h3>States & Locations</h3>
+                    <div>${statesHtml}</div>
+                </div>
+
+                <div class="detail-section">
+                    <h3>Topics</h3>
+                    <div>${topicsHtml}</div>
+                </div>
+
+                <div class="detail-section">
+                    <h3>Entities</h3>
+                    <div>${entitiesHtml}</div>
+                </div>
+
+                ${data.key_claims ? `<div class="detail-section"><h3>Key Claims</h3><div class="detail-text">${escapeHtml(data.key_claims)}</div></div>` : ''}
+
+                ${data.sentiment_justification ? `<div class="detail-section"><h3>Sentiment Justification</h3><div class="detail-text">${escapeHtml(data.sentiment_justification)}</div></div>` : ''}
+
+                ${contentPreview ? `<div class="detail-section"><h3>Content</h3><div class="detail-text" style="font-size:0.85rem">${escapeHtml(contentPreview)}</div></div>` : ''}
+
+                <details style="margin-top:16px">
+                    <summary style="color:var(--muted);cursor:pointer;font-size:0.8rem">Raw Analysis JSON</summary>
+                    <pre class="raw-json">${escapeHtml(JSON.stringify(data, null, 2))}</pre>
+                </details>
+            </div>
+        `;
+    } catch (err) {
+        document.getElementById('articleDetailContent').innerHTML =
+            `<span class="task-error">Error loading article: ${escapeHtml(err.message)}</span>`;
+    }
+}
+
+function showArticleList() {
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById('page-articles').classList.add('active');
+}
+
+// ══════════════════════════════════════════════
+//  CONFIG / KEYWORD VISIBILITY (System page)
+// ══════════════════════════════════════════════
+
+async function renderConfigSection() {
+    const container = document.getElementById('configSection');
+    if (!container) return;
+
+    try {
+        const [topicsData, kwData] = await Promise.all([
+            fetchJSON('/api/config/topics'),
+            fetchJSON('/api/config/keywords'),
+        ]);
+
+        let html = '<div class="sh" style="margin-top:24px">Topics</div>';
+        html += '<table class="dt"><thead><tr><th>Key</th><th>Label</th><th>Description</th></tr></thead><tbody>';
+        for (const t of (topicsData.topics || [])) {
+            html += `<tr><td><span class="pill pill-topic">${escapeHtml(t.key)}</span></td><td>${escapeHtml(t.label)}</td><td style="color:var(--muted)">${escapeHtml(t.description)}</td></tr>`;
+        }
+        html += '</tbody></table>';
+
+        html += '<div class="sh" style="margin-top:24px">Nationwide Keywords</div>';
+        const nk = kwData.nationwide_keywords || {};
+        html += '<div style="margin-bottom:8px"><strong style="color:var(--muted);font-size:0.75rem">PRIMARY:</strong> ';
+        html += (nk.primary || []).map(k => `<span class="pill pill-topic">${escapeHtml(k)}</span>`).join(' ');
+        html += '</div>';
+        html += '<div style="margin-bottom:8px"><strong style="color:var(--muted);font-size:0.75rem">COMPANIES:</strong> ';
+        html += (nk.companies || []).map(k => `<span class="pill pill-entity">${escapeHtml(k)}</span>`).join(' ');
+        html += '</div>';
+        html += '<div style="margin-bottom:12px"><strong style="color:var(--muted);font-size:0.75rem">SECONDARY:</strong> ';
+        html += (nk.secondary || []).map(k => `<span class="pill pill-loc">${escapeHtml(k)}</span>`).join(' ');
+        html += '</div>';
+
+        const nq = kwData.nationwide_queries || [];
+        if (nq.length) {
+            html += '<div class="sh" style="margin-top:16px">Nationwide Search Queries</div>';
+            html += `<div style="margin-bottom:12px">${nq.map(q => `<code style="color:var(--accent);font-size:0.8rem;margin-right:8px;display:inline-block;margin-bottom:4px">${escapeHtml(q)}</code>`).join('')}</div>`;
+        }
+
+        for (const [stateKey, cfg] of Object.entries(kwData.priority_states || {})) {
+            const kw = cfg.keywords || {};
+            html += `<div class="sh" style="margin-top:16px">${capitalize(stateKey)} (Priority State)</div>`;
+            if (kw.primary && kw.primary.length) {
+                html += `<div style="margin-bottom:4px"><strong style="color:var(--muted);font-size:0.75rem">PRIMARY:</strong> ${kw.primary.map(k => `<span class="pill pill-topic">${escapeHtml(k)}</span>`).join(' ')}</div>`;
+            }
+            if (kw.companies && kw.companies.length) {
+                html += `<div style="margin-bottom:4px"><strong style="color:var(--muted);font-size:0.75rem">COMPANIES:</strong> ${kw.companies.map(k => `<span class="pill pill-entity">${escapeHtml(k)}</span>`).join(' ')}</div>`;
+            }
+            if (kw.secondary && kw.secondary.length) {
+                html += `<div style="margin-bottom:4px"><strong style="color:var(--muted);font-size:0.75rem">SECONDARY:</strong> ${kw.secondary.map(k => `<span class="pill pill-loc">${escapeHtml(k)}</span>`).join(' ')}</div>`;
+            }
+            if (cfg.web_search_queries && cfg.web_search_queries.length) {
+                html += `<div style="margin-bottom:4px"><strong style="color:var(--muted);font-size:0.75rem">SEARCH QUERIES:</strong> ${cfg.web_search_queries.map(q => `<code style="color:var(--accent);font-size:0.8rem;margin-right:8px">${escapeHtml(q)}</code>`).join('')}</div>`;
+            }
+        }
+
+        container.innerHTML = html;
+    } catch (err) {
+        container.innerHTML = `<span class="task-error">Error loading config: ${escapeHtml(err.message)}</span>`;
+    }
+}
+
 // ── Init ──
 document.addEventListener('DOMContentLoaded', async () => {
-    await initStateDropdowns();
+    await Promise.all([initStateDropdowns(), _loadRegionOptions()]);
     renderDashboard();
 });

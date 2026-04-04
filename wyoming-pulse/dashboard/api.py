@@ -16,6 +16,7 @@ from flask import Blueprint, current_app, jsonify, request, send_file
 import db
 import geo
 import sentiment_index
+from shared import load_config
 
 logger = logging.getLogger("wyoming_pulse.api")
 
@@ -70,10 +71,17 @@ def get_conn():
 # /api/overview
 # ──────────────────────────────────────────────
 def _state_filter(base_where="analyzed = 1"):
-    """Build WHERE clause and params with optional ?state= filter."""
+    """Build WHERE clause and params with optional ?state= filter.
+    Uses article_states junction table so multi-state articles count
+    for all their states.
+    """
     state = request.args.get("state")
     if state:
-        return f"{base_where} AND state = ?", [state]
+        return (
+            f"{base_where} AND articles.id IN "
+            f"(SELECT article_id FROM article_states WHERE state = ?)",
+            [state],
+        )
     return base_where, []
 
 
@@ -120,6 +128,20 @@ def overview():
         if cur_avg is not None and prev_avg is not None:
             sentiment_change = round(cur_avg - prev_avg, 2)
 
+        # Sentiment distribution by label
+        dist_rows = conn.execute(
+            f"SELECT sentiment_label, COUNT(*) as c FROM articles "
+            f"WHERE {where} AND sentiment_label IS NOT NULL "
+            f"GROUP BY sentiment_label", params
+        ).fetchall()
+        sentiment_distribution = {
+            "strongly_negative": 0, "slightly_negative": 0,
+            "neutral": 0, "slightly_positive": 0, "strongly_positive": 0,
+        }
+        for r in dist_rows:
+            if r["sentiment_label"] in sentiment_distribution:
+                sentiment_distribution[r["sentiment_label"]] = r["c"]
+
         last_ingest = conn.execute(
             "SELECT run_date FROM feed_runs ORDER BY run_date DESC LIMIT 1"
         ).fetchone()
@@ -136,6 +158,7 @@ def overview():
             "current_period_avg": cur_avg,
             "previous_period_avg": prev_avg,
             "sentiment_change": sentiment_change,
+            "sentiment_distribution": sentiment_distribution,
             "last_ingestion": last_ingest["run_date"] if last_ingest else None,
             "last_analysis": last_analysis["analyzed_date"] if last_analysis else None,
         })
@@ -151,11 +174,15 @@ def states():
     """Return all states with analyzed articles, with reference data."""
     conn = get_conn()
     try:
+        # Use article_states junction table so multi-state articles
+        # count for each state they mention
         rows = conn.execute(
-            "SELECT state, COUNT(*) as count FROM articles "
-            "WHERE analyzed = 1 AND state IS NOT NULL "
-            "AND state NOT IN ('nationwide', 'other') "
-            "GROUP BY state ORDER BY state ASC"
+            "SELECT ast.state, COUNT(DISTINCT ast.article_id) as count "
+            "FROM article_states ast "
+            "JOIN articles a ON a.id = ast.article_id "
+            "WHERE a.analyzed = 1 AND ast.state IS NOT NULL "
+            "AND ast.state NOT IN ('nationwide', 'other') "
+            "GROUP BY ast.state ORDER BY ast.state ASC"
         ).fetchall()
 
         states_list = []
@@ -172,6 +199,25 @@ def states():
         return jsonify({"states": states_list})
     finally:
         conn.close()
+
+
+# ──────────────────────────────────────────────
+# /api/state-locations
+# ──────────────────────────────────────────────
+@bp.route("/state-locations")
+def state_locations():
+    """Return per-state location options derived from config."""
+    config = load_config()
+    locations = {}
+    for state_key, state_cfg in config.get("priority_states", {}).items():
+        locs = state_cfg.get("locations", {})
+        entries = []
+        for loc_key, _keywords in locs.items():
+            label = loc_key.replace("_", " ").title()
+            entries.append([loc_key, label])
+        if entries:
+            locations[state_key] = entries
+    return jsonify({"locations": locations})
 
 
 # ──────────────────────────────────────────────
@@ -243,9 +289,12 @@ def state_sentiment():
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT state, AVG(sentiment_score) as avg, COUNT(*) as count "
-            "FROM articles WHERE analyzed = 1 AND state IS NOT NULL "
-            "GROUP BY state"
+            "SELECT ast.state, AVG(a.sentiment_score) as avg, "
+            "COUNT(DISTINCT ast.article_id) as count "
+            "FROM article_states ast "
+            "JOIN articles a ON a.id = ast.article_id "
+            "WHERE a.analyzed = 1 AND ast.state IS NOT NULL "
+            "GROUP BY ast.state"
         ).fetchall()
         result = {}
         for r in rows:
@@ -267,7 +316,9 @@ def locations():
     """Per-location sentiment for a state, normalized to county level."""
     conn = get_conn()
     try:
-        state = request.args.get("state", "wyoming")
+        state = request.args.get("state")
+        if not state:
+            return jsonify({"error": "state parameter is required"}), 400
         rows = conn.execute(
             "SELECT location_relevance, sentiment_score FROM articles "
             "WHERE analyzed = 1 AND state = ? AND sentiment_score IS NOT NULL",
@@ -683,6 +734,94 @@ def export_report():
 
 
 # ──────────────────────────────────────────────
+# /api/config/* — Configuration Endpoints
+# ──────────────────────────────────────────────
+
+@bp.route("/config/topics")
+def config_topics():
+    """Return the configured topic categories."""
+    config = load_config()
+    topics = config.get("topics", [])
+    return jsonify({"topics": topics})
+
+
+@bp.route("/config/keywords")
+def config_keywords():
+    """Return the full keyword configuration for visibility."""
+    config = load_config()
+    nationwide = config.get("nationwide", {})
+    result = {
+        "nationwide_keywords": nationwide.get("keywords", {}),
+        "nationwide_queries": nationwide.get("web_search_queries", []),
+        "priority_states": {},
+    }
+    for state_key, state_cfg in config.get("priority_states", {}).items():
+        result["priority_states"][state_key] = {
+            "keywords": state_cfg.get("keywords", {}),
+            "web_search_queries": state_cfg.get("web_search_queries", []),
+        }
+    return jsonify(result)
+
+
+@bp.route("/article/<int:article_id>")
+def article_detail(article_id):
+    """Return full article details for the detail page."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "Article not found"}), 404
+
+        # Parse JSON fields
+        topic_tags = json.loads(row["topic_tags"]) if row["topic_tags"] else []
+        entities = json.loads(row["entities_mentioned"]) if row["entities_mentioned"] else []
+        locations = json.loads(row["locations_json"]) if row["locations_json"] else []
+
+        # Get location details from article_states
+        state_rows = conn.execute(
+            "SELECT * FROM article_states WHERE article_id = ?", (article_id,)
+        ).fetchall()
+        state_details = [
+            {
+                "state": sr["state"],
+                "place": sr["place"],
+                "relevance": sr["relevance"],
+                "county_fips": sr["county_fips"],
+                "county_name": sr["county_name"],
+            }
+            for sr in state_rows
+        ]
+
+        return jsonify({
+            "id": row["id"],
+            "title": row["title"],
+            "source": row["source"],
+            "source_type": row["source_type"],
+            "url": row["url"],
+            "published_date": row["published_date"],
+            "ingested_date": row["ingested_date"],
+            "analyzed": bool(row["analyzed"]),
+            "analyzed_date": row["analyzed_date"],
+            "sentiment_score": row["sentiment_score"],
+            "sentiment_label": row["sentiment_label"],
+            "state": row["state"],
+            "location_relevance": row["location_relevance"],
+            "topic_tags": topic_tags,
+            "entities_mentioned": entities,
+            "key_claims": row["key_claims"],
+            "sentiment_justification": row["sentiment_justification"],
+            "summary": row["summary"],
+            "full_text": row["full_text"],
+            "locations": locations,
+            "state_details": state_details,
+        })
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────
 # /api/control/* — Control Panel Endpoints
 # ──────────────────────────────────────────────
 
@@ -753,9 +892,57 @@ def control_run_ingest():
 
 @bp.route("/control/run-analysis", methods=["POST"])
 def control_run_analysis():
-    """Trigger sentiment analysis in background."""
+    """Trigger sentiment analysis in background with progress tracking."""
     import analyze
-    task_id = _run_in_background("analysis", analyze.analyze_articles)
+
+    task_id = str(uuid.uuid4())[:8]
+    with _tasks_lock:
+        _tasks[task_id] = {
+            "task_id": task_id,
+            "type": "analysis",
+            "status": "running",
+            "started": datetime.utcnow().isoformat(),
+            "finished": None,
+            "result": None,
+            "error": None,
+            "progress": None,
+        }
+
+    def _progress(current, total):
+        with _tasks_lock:
+            _tasks[task_id]["progress"] = {"current": current, "total": total}
+
+    def _worker():
+        try:
+            # Step 1: Scrape full text for thin articles before analysis
+            import scraper
+            conn = get_conn()
+            try:
+                scrape_result = scraper.scrape_thin_articles(conn)
+                logger.info("Scraping: %d scraped, %d failed",
+                            scrape_result.get("scraped", 0),
+                            scrape_result.get("failed", 0))
+            except Exception as e:
+                logger.warning("Scraping step failed (continuing): %s", e)
+            finally:
+                conn.close()
+
+            # Step 2: Run sentiment analysis
+            result = analyze.analyze_articles(progress_callback=_progress)
+            result["scrape_scraped"] = scrape_result.get("scraped", 0) if 'scrape_result' in dir() else 0
+            with _tasks_lock:
+                _tasks[task_id]["status"] = "completed"
+                _tasks[task_id]["finished"] = datetime.utcnow().isoformat()
+                _tasks[task_id]["result"] = result
+        except Exception as e:
+            logger.error("Task %s (analysis) failed: %s", task_id, e)
+            with _tasks_lock:
+                _tasks[task_id]["status"] = "error"
+                _tasks[task_id]["finished"] = datetime.utcnow().isoformat()
+                _tasks[task_id]["error"] = str(e)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
     return jsonify({"task_id": task_id})
 
 
