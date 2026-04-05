@@ -55,7 +55,11 @@ def _try_gnewsdecoder(url, interval=0.5):
         if result.get("status"):
             return result["decoded_url"]
         else:
-            logger.debug("gnewsdecoder failed: %s", result.get("message", "unknown"))
+            msg = result.get("message", "")
+            if "429" in msg:
+                logger.debug("gnewsdecoder: Google rate limit (429)")
+            else:
+                logger.debug("gnewsdecoder failed: %s", msg)
     except ImportError:
         logger.warning("googlenewsdecoder not installed — run: pip install googlenewsdecoder")
     except Exception as e:
@@ -63,13 +67,51 @@ def _try_gnewsdecoder(url, interval=0.5):
     return None
 
 
-def resolve_google_news_url(url, interval=0.5):
+def _try_title_search(title, source=None):
+    """
+    Fallback: search for the article by title using DuckDuckGo lite.
+    Returns the first matching URL or None.
+    """
+    if not title:
+        return None
+    try:
+        import requests as req
+        from urllib.parse import quote_plus, unquote
+
+        # Clean title: strip source suffix that Google News appends
+        clean_title = title.rsplit(" - ", 1)[0] if " - " in title else title
+
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        resp = req.get(
+            f"https://lite.duckduckgo.com/lite/?q={quote_plus(clean_title)}",
+            headers=headers, timeout=10,
+        )
+        if resp.status_code != 200:
+            return None
+
+        # DDG lite encodes result URLs in uddg= parameters
+        uddg_links = re.findall(r"uddg=([^&\"]+)", resp.text)
+        if uddg_links:
+            decoded = [unquote(u) for u in uddg_links]
+            # Return first non-aggregator result
+            for u in decoded:
+                if any(skip in u for skip in ["duckduckgo", "google.com", "bing.com"]):
+                    continue
+                logger.debug("Title search found: %s", u[:80])
+                return u
+    except Exception as e:
+        logger.debug("Title search failed: %s", e)
+    return None
+
+
+def resolve_google_news_url(url, interval=0.5, title=None, source=None):
     """
     Resolve a Google News redirect URL to the actual article URL.
     Uses a layered strategy:
       1. Fast base64 offline decode (works for older CBMi format with embedded URLs)
       2. googlenewsdecoder package (handles newer AU_yqL format via Google's batchexecute)
-      3. Fallback: return original URL
+      3. DuckDuckGo title search (fallback when Google rate-limits us)
+      4. Fallback: return original URL
 
     Can be called from websearch.py (at ingest time) or scraper.py (at scrape time).
     """
@@ -87,6 +129,13 @@ def resolve_google_news_url(url, interval=0.5):
     if decoded:
         logger.debug("Resolved via gnewsdecoder: %s -> %s", url[:60], decoded[:80])
         return decoded
+
+    # Layer 3: title search via DuckDuckGo (fallback for rate-limited scenarios)
+    if title:
+        decoded = _try_title_search(title, source)
+        if decoded:
+            logger.debug("Resolved via title search: %s -> %s", url[:60], decoded[:80])
+            return decoded
 
     logger.warning("Could not resolve Google News URL: %s", url[:80])
     return url

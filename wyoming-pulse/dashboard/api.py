@@ -780,8 +780,27 @@ def resolve_url():
     if "news.google.com" not in url:
         return redirect(url)
 
+    # Look up the title for DDG fallback
+    title = None
+    source = None
+    conn = get_conn()
+    try:
+        if table == "pending_articles":
+            row = conn.execute(
+                "SELECT title, source FROM pending_articles WHERE url = ? LIMIT 1", (url,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT title, source FROM articles WHERE url = ? LIMIT 1", (url,)
+            ).fetchone()
+        if row:
+            title = row["title"]
+            source = row["source"]
+    finally:
+        conn.close()
+
     from scraper import resolve_google_news_url
-    resolved = resolve_google_news_url(url, interval=1)
+    resolved = resolve_google_news_url(url, interval=1, title=title, source=source)
 
     # Cache back to DB if resolved
     if resolved != url:
