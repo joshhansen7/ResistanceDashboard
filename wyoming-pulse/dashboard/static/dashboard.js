@@ -7,10 +7,12 @@ let currentPage = 'dashboard';
 let articleOffset = 0;
 let articleTotal = 0;
 let articleCache = {};  // id -> article data for detail panel
-let mapView = 'none';        // 'none' | 'us' | 'county'
+let mapView = 'none';        // 'none' | 'us' | 'county' | 'single-county'
 let mapActiveState = null;    // 'wyoming' | 'texas' | null
+let mapActiveCounty = null;   // county FIPS string | null
 let mapTopoData = null;       // cached TopoJSON
 let mapStateSentiment = {};   // cached state-level sentiment
+let mapNavStack = [];         // navigation breadcrumb for back button
 let _statesCache = null;      // cached /api/states response
 let _stateFipsCache = null;   // cached /api/state-fips response
 
@@ -209,6 +211,11 @@ function timeAgo(iso) {
     return Math.floor(h / 24) + 'd ago';
 }
 
+function truncate(str, max) {
+    if (!str) return '';
+    return str.length > max ? str.slice(0, max) + '...' : str;
+}
+
 // Shared tooltip config
 const ttCfg = {
     backgroundColor: '#0a0f1a',
@@ -309,8 +316,8 @@ async function renderUSMap(stateSentiment) {
 
         const svg = d3.select(container)
             .append('svg')
-            .attr('width', width)
-            .attr('height', height);
+            .attr('viewBox', `0 0 ${width} ${height}`)
+            .attr('preserveAspectRatio', 'xMidYMid meet');
 
         svg.selectAll('.state-path')
             .data(states.features)
@@ -369,9 +376,18 @@ async function renderUSMap(stateSentiment) {
 
         mapView = 'us';
         mapActiveState = null;
+        mapActiveCounty = null;
+        mapNavStack = [];
         mapStateSentiment = stateSentiment;
         document.getElementById('mapTitle').textContent = 'United States';
         document.getElementById('mapBackBtn').style.display = 'none';
+
+        // Update articles panel for current scope
+        const stateFilter = (document.getElementById('dashStateFilter') || {}).value || '';
+        updateArticlesPanel(stateFilter
+            ? { state: stateFilter, title: getStateName(stateFilter) || 'Recent Articles' }
+            : { title: 'Recent Articles' }
+        );
 
     } catch (err) {
         console.error('US map render error:', err);
@@ -408,8 +424,8 @@ async function drillIntoState(stateKey) {
 
         const svg = d3.select(container)
             .append('svg')
-            .attr('width', width)
-            .attr('height', height);
+            .attr('viewBox', `0 0 ${width} ${height}`)
+            .attr('preserveAspectRatio', 'xMidYMid meet');
 
         // Neighboring state outlines (rendered first, behind counties)
         const neighborStates = statesGeo.features.filter(f => String(f.id) !== config.fips);
@@ -457,6 +473,20 @@ async function drillIntoState(stateKey) {
             .on('mousemove', function(event) { positionTooltip(event, container); })
             .on('mouseleave', function() {
                 document.getElementById('mapTooltip').classList.remove('visible');
+            })
+            .on('click', function(event, d) {
+                const cfips = String(d.id);
+                const county = fipsToCounty[cfips];
+                const countyDisplayName = (d.properties && d.properties.name)
+                    ? d.properties.name + ' Co.' : county || `FIPS ${cfips}`;
+                if (county && locations[county] && locations[county].avg !== null) {
+                    drillIntoCounty(stateKey, config.name, config.fips, cfips, countyDisplayName);
+                } else {
+                    const tooltip = document.getElementById('mapTooltip');
+                    tooltip.textContent = `${countyDisplayName} — No articles`;
+                    tooltip.classList.add('visible');
+                    setTimeout(() => tooltip.classList.remove('visible'), 1500);
+                }
             });
 
         // Color counties using FIPS from API response
@@ -504,11 +534,18 @@ async function drillIntoState(stateKey) {
 
         mapView = 'county';
         mapActiveState = stateKey;
+        mapActiveCounty = null;
+        mapNavStack = [{ view: 'us' }];
         document.getElementById('mapTitle').textContent = config.name;
         document.getElementById('mapBackBtn').style.display = '';
 
-        // Update key metrics to reflect the clicked state
+        // Sync the dashboard state dropdown
+        const dashFilter = document.getElementById('dashStateFilter');
+        if (dashFilter && dashFilter.value !== stateKey) dashFilter.value = stateKey;
+
+        // Update key metrics and articles panel for this state
         updateMetrics(`?state=${stateKey}`);
+        updateArticlesPanel({ state: stateKey, title: config.name });
 
     } catch (err) {
         console.error('State map render error:', err);
@@ -542,8 +579,8 @@ async function drillIntoGenericState(stateKey, stateName, fips) {
 
         const svg = d3.select(container)
             .append('svg')
-            .attr('width', width)
-            .attr('height', height);
+            .attr('viewBox', `0 0 ${width} ${height}`)
+            .attr('preserveAspectRatio', 'xMidYMid meet');
 
         // Neighboring states
         const neighborStates = statesGeo.features.filter(f => String(f.id) !== fips);
@@ -587,6 +624,20 @@ async function drillIntoGenericState(stateKey, stateName, fips) {
             .on('mousemove', function(event) { positionTooltip(event, container); })
             .on('mouseleave', function() {
                 document.getElementById('mapTooltip').classList.remove('visible');
+            })
+            .on('click', function(event, d) {
+                const cfips = String(d.id);
+                const county = fipsToCounty[cfips];
+                const countyDisplayName = (d.properties && d.properties.name)
+                    ? d.properties.name + ' Co.' : county || `FIPS ${cfips}`;
+                if (county && locations[county] && locations[county].avg !== null) {
+                    drillIntoCounty(stateKey, stateName, fips, cfips, countyDisplayName);
+                } else {
+                    const tooltip = document.getElementById('mapTooltip');
+                    tooltip.textContent = `${countyDisplayName} — No articles`;
+                    tooltip.classList.add('visible');
+                    setTimeout(() => tooltip.classList.remove('visible'), 1500);
+                }
             });
 
         // Color counties
@@ -614,9 +665,17 @@ async function drillIntoGenericState(stateKey, stateName, fips) {
 
         mapView = 'county';
         mapActiveState = stateKey;
+        mapActiveCounty = null;
+        mapNavStack = [{ view: 'us' }];
         document.getElementById('mapTitle').textContent = stateName;
         document.getElementById('mapBackBtn').style.display = '';
+
+        // Sync the dashboard state dropdown
+        const dashFilter = document.getElementById('dashStateFilter');
+        if (dashFilter && dashFilter.value !== stateKey) dashFilter.value = stateKey;
+
         updateMetrics(`?state=${stateKey}`);
+        updateArticlesPanel({ state: stateKey, title: stateName });
 
     } catch (err) {
         console.error('Generic state map render error:', err);
@@ -624,24 +683,240 @@ async function drillIntoGenericState(stateKey, stateName, fips) {
     }
 }
 
-// ── Back to US map ──
+// ── County drill-down (single county zoom) ──
+async function drillIntoCounty(stateKey, stateName, stateFips, countyFips, countyName) {
+    const container = document.getElementById('wyomingMap');
+    document.getElementById('mapTooltip').classList.remove('visible');
+    container.innerHTML = '';
+
+    try {
+        const us = await ensureTopoData();
+        const counties = topojson.feature(us, us.objects.counties);
+        const statesGeo = topojson.feature(us, us.objects.states);
+
+        // All counties in this state
+        const stateCounties = {
+            type: 'FeatureCollection',
+            features: counties.features.filter(f => String(f.id).startsWith(stateFips))
+        };
+
+        // The target county
+        const targetCounty = {
+            type: 'FeatureCollection',
+            features: counties.features.filter(f => String(f.id) === countyFips)
+        };
+
+        if (!targetCounty.features.length) {
+            container.innerHTML = '<div class="no-data">County not found</div>';
+            return;
+        }
+
+        const width = container.clientWidth;
+        const height = container.clientHeight || 330;
+
+        // Fit projection to the target county with some padding
+        const projection = d3.geoAlbersUsa().fitExtent(
+            [[width * 0.1, height * 0.1], [width * 0.9, height * 0.9]],
+            targetCounty
+        );
+        const path = d3.geoPath().projection(projection);
+
+        const svg = d3.select(container)
+            .append('svg')
+            .attr('viewBox', `0 0 ${width} ${height}`)
+            .attr('preserveAspectRatio', 'xMidYMid meet');
+
+        // Draw neighboring counties (rest of state) as background
+        svg.selectAll('.neighbor-county')
+            .data(stateCounties.features.filter(f => String(f.id) !== countyFips))
+            .enter()
+            .append('path')
+            .attr('class', 'neighbor-county')
+            .attr('d', path)
+            .attr('fill', '#0a0e17')
+            .attr('stroke', 'rgba(148,163,184,0.15)')
+            .attr('stroke-width', 0.5);
+
+        // Draw the target county highlighted
+        svg.selectAll('.target-county')
+            .data(targetCounty.features)
+            .enter()
+            .append('path')
+            .attr('class', 'target-county')
+            .attr('d', path)
+            .attr('fill', (() => {
+                // Re-fetch the sentiment for coloring
+                return '#0f1520';  // will be colored below
+            })())
+            .attr('stroke', '#14b8a6')
+            .attr('stroke-width', 2);
+
+        // Fetch and apply sentiment color for this county
+        const locations = await fetchJSON(`/api/locations?state=${stateKey}`);
+        Object.entries(locations).forEach(([name, data]) => {
+            if (data.fips === countyFips && data.avg !== null) {
+                svg.select('.target-county')
+                    .attr('fill', sentimentColor(data.avg));
+            }
+        });
+
+        // State outline (faint)
+        const stateOutline = statesGeo.features.filter(f => String(f.id) === stateFips);
+        if (stateOutline.length) {
+            svg.append('path')
+                .datum(stateOutline[0])
+                .attr('d', path)
+                .attr('fill', 'none')
+                .attr('stroke', 'rgba(20,184,166,0.15)')
+                .attr('stroke-width', 0.5);
+        }
+
+        mapView = 'single-county';
+        mapActiveState = stateKey;
+        mapActiveCounty = countyFips;
+        document.getElementById('mapTitle').textContent = countyName;
+        document.getElementById('mapBackBtn').style.display = '';
+
+        // Update metrics and articles panel for this county
+        updateMetrics(`?county_fips=${countyFips}`);
+        updateArticlesPanel({ county_fips: countyFips, state: stateKey, title: countyName });
+
+    } catch (err) {
+        console.error('County drill-down error:', err);
+        container.innerHTML = '<div class="no-data">County view unavailable</div>';
+    }
+}
+
+// ── Back navigation (handles 3 levels: county → state → US) ──
 async function showUSMap() {
+    if (mapView === 'single-county' && mapActiveState) {
+        // Go back to state view (not all the way to US)
+        if (STATE_CONFIG[mapActiveState]) {
+            drillIntoState(mapActiveState);
+        } else {
+            if (!_stateFipsCache) _stateFipsCache = await fetchJSON('/api/state-fips');
+            const fips = _stateFipsCache[mapActiveState];
+            if (fips) drillIntoGenericState(mapActiveState, getStateName(mapActiveState), fips);
+        }
+        return;
+    }
+
+    // Go back to US map
     if (!mapStateSentiment || Object.keys(mapStateSentiment).length === 0) {
         mapStateSentiment = await fetchJSON('/api/state-sentiment');
     }
-    renderUSMap(mapStateSentiment);
 
-    // Reset key metrics to match the dropdown filter (or all states)
-    const stateFilter = (document.getElementById('dashStateFilter') || {}).value || '';
-    const qs = stateFilter ? `?state=${stateFilter}` : '';
-    updateMetrics(qs);
+    // Reset dropdown to "All States"
+    const dashFilter = document.getElementById('dashStateFilter');
+    if (dashFilter) dashFilter.value = '';
+
+    renderUSMap(mapStateSentiment);
+    updateMetrics('');
+}
+
+// ══════════════════════════════════════════════
+//  ARTICLES PANEL (left sidebar on dashboard)
+// ══════════════════════════════════════════════
+async function updateArticlesPanel(scope) {
+    const panel = document.getElementById('articlesPanelList');
+    const titleEl = document.getElementById('articlesPanelTitle');
+    const viewAllBtn = document.getElementById('articlesPanelViewAll');
+    if (!panel || !titleEl) return;
+
+    // Build query string
+    let qs = 'limit=5';
+    if (scope.county_fips) qs += `&county_fips=${scope.county_fips}`;
+    else if (scope.state) qs += `&state=${scope.state}`;
+
+    titleEl.textContent = scope.title || 'Recent Articles';
+
+    try {
+        const data = await fetchJSON(`/api/articles?${qs}`);
+        if (!data.articles || !data.articles.length) {
+            panel.innerHTML = '<div class="no-data">No articles found</div>';
+            if (viewAllBtn) viewAllBtn.style.display = 'none';
+            return;
+        }
+
+        panel.innerHTML = data.articles.map((a, i) => {
+            const scoreColor = sentimentColor(a.sentiment_score);
+            const scoreText = a.sentiment_score != null ? a.sentiment_score.toFixed(1) : '--';
+            const title = truncate(a.title || 'Untitled', 80);
+            const summary = truncate(a.summary || '', 120);
+            const source = a.source || '';
+            const ago = timeAgo(a.published_date);
+
+            let expandedHtml = '';
+            if (a.key_claims) expandedHtml += `<div class="card-claims"><strong>Key Claims: </strong>${a.key_claims}</div>`;
+            if (a.sentiment_justification) expandedHtml += `<div class="card-rationale"><strong>Rationale: </strong>${a.sentiment_justification}</div>`;
+            if (a.url) expandedHtml += `<a href="${a.url}" target="_blank" rel="noopener" class="card-link">Read full article &rarr;</a>`;
+
+            return `<div class="article-card" onclick="toggleArticleCard(this)">
+                <div class="card-header">
+                    <span class="card-score" style="background:${scoreColor}">${scoreText}</span>
+                    <span class="card-title">${title}</span>
+                </div>
+                <div class="card-meta">${source} &middot; ${ago}</div>
+                ${summary ? `<div class="card-summary">${summary}</div>` : ''}
+                <div class="card-expanded">${expandedHtml}</div>
+            </div>`;
+        }).join('');
+
+        if (viewAllBtn) viewAllBtn.style.display = data.total > 5 ? '' : 'none';
+        window._articlesPanelScope = scope;
+    } catch (err) {
+        console.error('Articles panel error:', err);
+        panel.innerHTML = '<div class="no-data">Error loading articles</div>';
+    }
+}
+
+function toggleArticleCard(el) {
+    el.classList.toggle('expanded');
+}
+
+function viewAllArticles() {
+    const scope = window._articlesPanelScope || {};
+    switchPage('articles');
+    setTimeout(async () => {
+        if (scope.state) {
+            const filterState = document.getElementById('filterState');
+            if (filterState) {
+                filterState.value = scope.state;
+                await onStateFilterChange();
+                if (scope.county_fips) {
+                    const filterLoc = document.getElementById('filterLocation');
+                    if (filterLoc) filterLoc.value = scope.county_fips;
+                }
+                renderArticles();
+            }
+        }
+    }, 50);
 }
 
 // ══════════════════════════════════════════════
 //  PAGE 1: DASHBOARD
 // ══════════════════════════════════════════════
-function onDashStateChange() {
-    renderDashboard();
+async function onDashStateChange() {
+    const stateKey = (document.getElementById('dashStateFilter') || {}).value || '';
+    if (!stateKey) {
+        // "All States" selected — go back to US map
+        mapView = 'none';
+        renderDashboard();
+        return;
+    }
+    // Drill into the selected state
+    if (STATE_CONFIG[stateKey]) {
+        drillIntoState(stateKey);
+    } else {
+        if (!_stateFipsCache) _stateFipsCache = await fetchJSON('/api/state-fips');
+        const fips = _stateFipsCache[stateKey];
+        if (fips) {
+            drillIntoGenericState(stateKey, getStateName(stateKey), fips);
+        } else {
+            // State has no FIPS (shouldn't happen) — just update metrics
+            renderDashboard();
+        }
+    }
 }
 
 function applyMetrics(overview, wsiData) {
@@ -709,9 +984,13 @@ async function renderDashboard() {
         const stateFilter = (document.getElementById('dashStateFilter') || {}).value || '';
         const qs = stateFilter ? `?state=${stateFilter}` : '';
 
-        // If drilled into a state on the map, metrics should reflect that state
-        const metricsQs = (mapView === 'county' && mapActiveState)
-            ? `?state=${mapActiveState}` : qs;
+        // If drilled into a county or state on the map, metrics should reflect that scope
+        let metricsQs = qs;
+        if (mapView === 'single-county' && mapActiveCounty) {
+            metricsQs = `?county_fips=${mapActiveCounty}`;
+        } else if (mapView === 'county' && mapActiveState) {
+            metricsQs = `?state=${mapActiveState}`;
+        }
 
         const [stateSentiment, overview, wsiData] = await Promise.all([
             fetchJSON('/api/state-sentiment'),
@@ -721,7 +1000,7 @@ async function renderDashboard() {
 
         applyMetrics(overview, wsiData);
 
-        // Map — default to US view, but don't reset if user drilled into a state
+        // Map — default to US view, but don't reset if user drilled into a state/county
         if (mapView === 'none' || mapView === 'us') {
             renderUSMap(stateSentiment);
         }
@@ -1278,13 +1557,15 @@ async function onStateFilterChange() {
         locSelect.innerHTML = '<option value="">All Regions</option>';
         locSelect.disabled = state === 'nationwide';
     } else {
-        // Fetch locations for this state dynamically
+        // Fetch locations for this state dynamically, use FIPS as option values
         try {
             const data = await fetchJSON(`/api/locations?state=${state}`);
             locSelect.innerHTML = '<option value="">All Regions</option>';
-            Object.keys(data).sort().forEach(loc => {
-                const label = loc.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-                locSelect.innerHTML += `<option value="${loc}">${label}</option>`;
+            Object.entries(data).sort((a, b) => a[0].localeCompare(b[0])).forEach(([loc, info]) => {
+                if (info.fips) {
+                    const label = loc.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                    locSelect.innerHTML += `<option value="${info.fips}">${label} (${info.count})</option>`;
+                }
             });
             locSelect.disabled = false;
         } catch (err) {
@@ -1303,7 +1584,11 @@ async function renderArticles(append = false) {
     const sent = document.getElementById('filterSentiment').value;
     let url = `/api/articles?limit=25&offset=${articleOffset}`;
     if (state) url += `&state=${state}`;
-    if (loc) url += `&location=${loc}`;
+    if (loc) {
+        // FIPS codes are numeric; use county_fips param for precision
+        if (/^\d+$/.test(loc)) url += `&county_fips=${loc}`;
+        else url += `&location=${loc}`;
+    }
     if (sent) url += `&sentiment_label=${sent}`;
 
     try {
@@ -1765,8 +2050,8 @@ async function approveQueueSelected() {
     } catch (err) { console.error('Approve error:', err); }
 }
 
-async function rejectQueueUnselected() {
-    const ids = Array.from(document.querySelectorAll('.queue-check:not(:checked)')).map(cb => parseInt(cb.dataset.id));
+async function rejectQueueSelected() {
+    const ids = Array.from(document.querySelectorAll('.queue-check:checked')).map(cb => parseInt(cb.dataset.id));
     if (ids.length === 0) return;
     const status = document.getElementById('queueStatus');
     try {
@@ -1779,26 +2064,40 @@ async function rejectQueueUnselected() {
     } catch (err) { console.error('Reject error:', err); }
 }
 
-async function approveAboveThreshold() {
-    const status = document.getElementById('queueStatus');
-    try {
-        const resp = await fetch('/api/control/approve-above', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ threshold: 7 }),
-        });
-        const data = await resp.json();
-        if (data.success) {
-            status.innerHTML = `<span class="task-complete">Approved ${data.approved} article${data.approved !== 1 ? 's' : ''} with score &ge; 7</span>`;
-            await renderReviewQueue();
-        }
-    } catch (err) { console.error('Approve-above error:', err); }
+function toggleSelectDropdown(e) {
+    e.stopPropagation();
+    const dd = document.getElementById('selectDropdown');
+    dd.classList.toggle('open');
+    // Close on next outside click
+    if (dd.classList.contains('open')) {
+        setTimeout(() => document.addEventListener('click', closeSelectDropdown, { once: true }), 0);
+    }
 }
 
-async function clearRejected() {
-    try {
-        await fetch('/api/control/clear-pending', { method: 'POST' });
-        document.getElementById('queueStatus').innerHTML = '<span class="task-complete">Cleared rejected articles</span>';
-    } catch (err) { console.error('Clear error:', err); }
+function closeSelectDropdown() {
+    document.getElementById('selectDropdown').classList.remove('open');
+}
+
+function queueSelectFiltered(filter) {
+    closeSelectDropdown();
+    document.querySelectorAll('.queue-check').forEach(cb => {
+        const id = parseInt(cb.dataset.id);
+        const article = _queueArticles.find(a => a.id === id);
+        if (!article) { cb.checked = false; return; }
+        switch (filter) {
+            case 'all':  cb.checked = true; break;
+            case 'none': cb.checked = false; break;
+            case 'score-4': cb.checked = (article.relevance_score === 4); break;
+            case 'score-5': cb.checked = (article.relevance_score === 5); break;
+            case 'score-6': cb.checked = (article.relevance_score === 6); break;
+            case 'type-rss':       cb.checked = (article.source_type === 'rss'); break;
+            case 'type-websearch': cb.checked = (article.source_type === 'websearch'); break;
+            default: break;
+        }
+    });
+    document.getElementById('queueSelectAll').checked =
+        document.querySelectorAll('.queue-check').length === document.querySelectorAll('.queue-check:checked').length;
+    updateQueueSelectedCount();
 }
 
 async function renderAnalysisQueue() {
@@ -1835,12 +2134,6 @@ async function renderAnalysisQueue() {
 }
 
 async function renderControl() {
-    // Set default date to today
-    const dateEl = document.getElementById('ctrlDate');
-    if (dateEl && !dateEl.value) {
-        dateEl.value = new Date().toISOString().split('T')[0];
-    }
-
     await renderReviewQueue();
     await renderAnalysisQueue();
 
@@ -1904,38 +2197,31 @@ async function submitArticle(e) {
     e.preventDefault();
     const btn = document.getElementById('btnSubmitArticle');
     const status = document.getElementById('statusArticle');
-    const title = document.getElementById('ctrlTitle').value.trim();
+    const url = document.getElementById('ctrlUrl').value.trim();
 
-    if (!title) {
-        status.innerHTML = '<span class="task-error">Title is required</span>';
+    if (!url) {
+        status.innerHTML = '<span class="task-error">URL is required</span>';
         return;
     }
 
     btn.disabled = true;
     btn.classList.add('running');
-    status.innerHTML = '<span class="task-running">Submitting...</span>';
+    status.innerHTML = '<span class="task-running">Fetching article...</span>';
 
     try {
-        const payload = {
-            source: document.getElementById('ctrlSource').value.trim() || 'Manual Entry',
-            source_type: document.getElementById('ctrlSourceType').value,
-            title: title,
-            url: document.getElementById('ctrlUrl').value.trim(),
-            published_date: document.getElementById('ctrlDate').value,
-            full_text: document.getElementById('ctrlText').value,
-        };
-
         const resp = await fetch('/api/control/add-article', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
+            body: JSON.stringify({ url }),
         });
         const data = await resp.json();
 
         if (data.success) {
-            status.innerHTML = `<span class="task-complete">Article added (ID: ${data.article_id})</span>`;
+            const titleSnip = data.title && data.title.length > 50 ? data.title.substring(0, 47) + '...' : (data.title || '');
+            const stateTag = data.state ? ` [${data.state}]` : '';
+            status.innerHTML = `<span class="task-complete">Added: ${escapeHtml(titleSnip)}${escapeHtml(stateTag)}</span>`;
             document.getElementById('articleForm').reset();
-            document.getElementById('ctrlDate').value = new Date().toISOString().split('T')[0];
+            await renderAnalysisQueue();
         } else {
             status.innerHTML = `<span class="task-error">${escapeHtml(data.error || 'Failed')}</span>`;
         }
@@ -1970,7 +2256,16 @@ async function runTask(type) {
     status.innerHTML = '<span class="task-running">Starting...</span>';
 
     try {
-        const resp = await fetch(TASK_ENDPOINTS[type], { method: 'POST' });
+        const fetchOpts = { method: 'POST' };
+        // Pass batch size for analysis tasks
+        if (type === 'analysis') {
+            const batchVal = document.getElementById('analysisBatchSize')?.value;
+            if (batchVal) {
+                fetchOpts.headers = { 'Content-Type': 'application/json' };
+                fetchOpts.body = JSON.stringify({ limit: parseInt(batchVal) });
+            }
+        }
+        const resp = await fetch(TASK_ENDPOINTS[type], fetchOpts);
         const data = await resp.json();
 
         if (data.task_id) {

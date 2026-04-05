@@ -6,6 +6,7 @@ Provides state reference data (name, abbreviation, FIPS) for all 50 US states.
 
 import json
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger("wyoming_pulse.geo")
@@ -70,6 +71,79 @@ def get_state_fips(state_key):
     """Get the FIPS code for a state key."""
     info = get_state_info(state_key)
     return info["fips"] if info else None
+
+
+def normalize_state_key(state_key):
+    """Normalize a state key: underscores to spaces, lowercase, validate.
+    Returns the canonical state key if valid US state, or None.
+    Also accepts 'nationwide' and 'district of columbia'.
+    """
+    if not state_key:
+        return None
+    key = state_key.lower().strip().replace("_", " ")
+    if key in ("nationwide", "other", "statewide"):
+        return key
+    if get_state_info(key):
+        return key
+    return None
+
+
+def is_valid_us_state(state_key):
+    """Check if a state key is a valid US state (or nationwide)."""
+    return normalize_state_key(state_key) is not None
+
+
+def infer_state_from_text(title, summary=""):
+    """
+    Scan article title and summary for US state names and abbreviations.
+    Returns the best-matching state key (e.g. "maine") or "nationwide".
+
+    Full state names are matched case-insensitively.
+    Two-letter abbreviations are matched only as standalone uppercase words
+    to avoid false positives (e.g. "IN", "OR", "ME" in normal prose).
+    """
+    states = _load_us_states()
+    if not states:
+        return "nationwide"
+
+    # Build lookup structures
+    name_to_key = {}       # "maine" -> "maine", "new york" -> "new york"
+    abbr_to_key = {}       # "ME" -> "maine", "NY" -> "new york"
+    for key, info in states.items():
+        name_to_key[info["name"].lower()] = key
+        abbr_to_key[info["abbr"]] = key
+
+    combined = f"{title} {summary}"
+    counts = {}
+
+    # Match full state names (case-insensitive, word-boundary)
+    for name_lower, key in name_to_key.items():
+        pattern = r"\b" + re.escape(name_lower) + r"\b"
+        hits = len(re.findall(pattern, combined, re.IGNORECASE))
+        if hits:
+            counts[key] = counts.get(key, 0) + hits
+
+    # Match abbreviations — only uppercase standalone words in original text
+    # Use a stricter pattern to avoid matching common English words
+    for abbr, key in abbr_to_key.items():
+        # Skip very ambiguous 2-letter abbreviations that are common words
+        # even in uppercase contexts (headlines often capitalize everything)
+        if abbr in ("IN", "OR", "OH", "OK", "HI", "ME"):
+            # For these, only match if preceded/followed by state-like context
+            # e.g. "in ME" won't match, but "Portland, ME" or "ME legislature" may
+            # We rely on the full-name match for these states instead
+            continue
+        pattern = r"(?<![A-Za-z])" + re.escape(abbr) + r"(?![A-Za-z])"
+        hits = len(re.findall(pattern, combined))
+        if hits:
+            counts[key] = counts.get(key, 0) + hits
+
+    if not counts:
+        return "nationwide"
+
+    # Return the state with the most mentions
+    best = max(counts, key=counts.get)
+    return best
 
 
 def normalize_location(place, state):

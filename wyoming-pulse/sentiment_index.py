@@ -81,7 +81,7 @@ def _parse_date(date_str):
             return None
 
 
-def compute_weekly_buckets(conn, state=None, weeks_back=WSI_WEEKS_BACK):
+def compute_weekly_buckets(conn, state=None, county_fips=None, weeks_back=WSI_WEEKS_BACK):
     """
     Fetch analyzed articles and group them into ISO-week buckets.
 
@@ -93,7 +93,11 @@ def compute_weekly_buckets(conn, state=None, weeks_back=WSI_WEEKS_BACK):
 
     where = "analyzed = 1 AND published_date IS NOT NULL AND published_date >= ?"
     params = [cutoff]
-    if state:
+    if county_fips:
+        where += (" AND articles.id IN "
+                  "(SELECT article_id FROM article_states WHERE county_fips = ?)")
+        params.append(county_fips)
+    elif state:
         where += " AND state = ?"
         params.append(state)
 
@@ -202,7 +206,7 @@ def _compute_week_score(clusters):
     return numerator / denominator
 
 
-def compute_wsi(conn, state=None, weeks_back=WSI_WEEKS_BACK):
+def compute_wsi(conn, state=None, county_fips=None, weeks_back=WSI_WEEKS_BACK):
     """
     Compute the current Weighted Sentiment Index.
 
@@ -211,7 +215,7 @@ def compute_wsi(conn, state=None, weeks_back=WSI_WEEKS_BACK):
       - raw_avg: simple average of all articles in the period
       - week_count: number of weeks with data
     """
-    buckets = compute_weekly_buckets(conn, state=state, weeks_back=weeks_back)
+    buckets = compute_weekly_buckets(conn, state=state, county_fips=county_fips, weeks_back=weeks_back)
     if not buckets:
         return {"current_wsi": None, "raw_avg": None, "week_count": 0}
 
@@ -253,7 +257,7 @@ def compute_wsi(conn, state=None, weeks_back=WSI_WEEKS_BACK):
     }
 
 
-def compute_wsi_trend(conn, state=None, weeks_back=WSI_WEEKS_BACK):
+def compute_wsi_trend(conn, state=None, county_fips=None, weeks_back=WSI_WEEKS_BACK):
     """
     Compute the WSI time series for charting.
 
@@ -262,7 +266,7 @@ def compute_wsi_trend(conn, state=None, weeks_back=WSI_WEEKS_BACK):
 
     Gaps (weeks with no articles) are filled with carried-forward values.
     """
-    buckets = compute_weekly_buckets(conn, state=state, weeks_back=weeks_back)
+    buckets = compute_weekly_buckets(conn, state=state, county_fips=county_fips, weeks_back=weeks_back)
 
     now = datetime.utcnow()
     current_monday = now - timedelta(days=now.weekday())
@@ -323,7 +327,7 @@ def compute_wsi_trend(conn, state=None, weeks_back=WSI_WEEKS_BACK):
     return trend
 
 
-def compute_period_comparison(conn, state=None):
+def compute_period_comparison(conn, state=None, county_fips=None):
     """
     Compare current 4-week WSI vs prior 4-week WSI.
 
@@ -337,7 +341,7 @@ def compute_period_comparison(conn, state=None):
     # Prior 4 weeks: the 4 weeks before that
     prior_start = (current_monday - timedelta(weeks=8)).strftime("%Y-%m-%d")
 
-    buckets = compute_weekly_buckets(conn, state=state, weeks_back=8)
+    buckets = compute_weekly_buckets(conn, state=state, county_fips=county_fips, weeks_back=8)
 
     current_scores = []
     prior_scores = []

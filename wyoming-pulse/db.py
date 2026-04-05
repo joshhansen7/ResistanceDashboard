@@ -302,13 +302,19 @@ def update_article_analysis(conn, article_id, analysis):
 
 
 def _sync_article_states(conn, article_id, locations):
-    """Sync the article_states junction table from a locations list."""
+    """Sync the article_states junction table from a locations list.
+    Only inserts valid US states (rejects countries, regions, junk).
+    """
+    import geo
     conn.execute("DELETE FROM article_states WHERE article_id = ?", (article_id,))
     if not locations or not isinstance(locations, list):
         return
     for loc in locations:
-        state = loc.get("state")
-        if not state:
+        raw_state = loc.get("state")
+        if not raw_state:
+            continue
+        state = geo.normalize_state_key(raw_state)
+        if not state or state in ("nationwide", "other", "statewide"):
             continue
         conn.execute(
             """INSERT INTO article_states (article_id, state, place, relevance, county_fips, county_name)

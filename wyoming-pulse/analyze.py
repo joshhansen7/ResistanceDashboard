@@ -79,7 +79,7 @@ def build_user_message(article):
 
 def parse_analysis_response(response_text):
     """Parse the JSON response from Claude, handling edge cases."""
-    from geo import normalize_locations
+    from geo import normalize_locations, normalize_state_key
 
     result = parse_json_response(response_text)
     if result is None:
@@ -94,6 +94,13 @@ def parse_analysis_response(response_text):
     if "locations" in result and isinstance(result["locations"], list) and result["locations"]:
         # New multi-location format
         locations = result["locations"]
+        # Normalize state keys and reject non-US locations
+        for loc in locations:
+            if "state" in loc:
+                loc["state"] = normalize_state_key(loc["state"]) or loc["state"]
+        # Filter to only valid US states
+        valid_locations = [l for l in locations if normalize_state_key(l.get("state"))]
+        locations = valid_locations if valid_locations else [{"state": "nationwide", "relevance": "primary", "place": "nationwide"}]
         # Normalize FIPS
         normalize_locations(locations)
         result["locations_json"] = locations
@@ -213,7 +220,7 @@ def analyze_articles(config=None, limit=None, progress_callback=None):
             try:
                 response = client.messages.create(
                     model=model,
-                    max_tokens=600,
+                    max_tokens=1024,
                     timeout=timeout,
                     system=system_prompt,
                     messages=[{"role": "user", "content": user_msg}],
@@ -254,7 +261,7 @@ def analyze_articles(config=None, limit=None, progress_callback=None):
             progress_callback(idx + 1, total)
 
         # Brief pause between API calls
-        time.sleep(0.5)
+        time.sleep(0.25)
 
     conn.close()
 

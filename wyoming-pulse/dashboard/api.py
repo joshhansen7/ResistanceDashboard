@@ -71,10 +71,17 @@ def get_conn():
 # /api/overview
 # ──────────────────────────────────────────────
 def _state_filter(base_where="analyzed = 1"):
-    """Build WHERE clause and params with optional ?state= filter.
+    """Build WHERE clause and params with optional ?state= and ?county_fips= filters.
     Uses article_states junction table so multi-state articles count
-    for all their states.
+    for all their states. county_fips takes precedence over state.
     """
+    county_fips = request.args.get("county_fips")
+    if county_fips:
+        return (
+            f"{base_where} AND articles.id IN "
+            f"(SELECT article_id FROM article_states WHERE county_fips = ?)",
+            [county_fips],
+        )
     state = request.args.get("state")
     if state:
         return (
@@ -254,11 +261,12 @@ def sentiment_index_endpoint():
     conn = get_conn()
     try:
         state = request.args.get("state") or None
+        county_fips = request.args.get("county_fips") or None
         weeks_back = request.args.get("weeks_back", 26, type=int)
 
-        wsi = sentiment_index.compute_wsi(conn, state=state, weeks_back=weeks_back)
-        trend = sentiment_index.compute_wsi_trend(conn, state=state, weeks_back=weeks_back)
-        comparison = sentiment_index.compute_period_comparison(conn, state=state)
+        wsi = sentiment_index.compute_wsi(conn, state=state, county_fips=county_fips, weeks_back=weeks_back)
+        trend = sentiment_index.compute_wsi_trend(conn, state=state, county_fips=county_fips, weeks_back=weeks_back)
+        comparison = sentiment_index.compute_period_comparison(conn, state=state, county_fips=county_fips)
 
         return jsonify({
             "current_wsi": wsi["current_wsi"],
@@ -313,32 +321,33 @@ def state_sentiment():
 # ──────────────────────────────────────────────
 @bp.route("/locations")
 def locations():
-    """Per-location sentiment for a state, normalized to county level."""
+    """Per-location sentiment for a state, normalized to county level.
+    Uses article_states junction table for consistent FIPS-based grouping.
+    """
     conn = get_conn()
     try:
         state = request.args.get("state")
         if not state:
             return jsonify({"error": "state parameter is required"}), 400
+
+        # Query via article_states for FIPS-based county grouping
         rows = conn.execute(
-            "SELECT location_relevance, sentiment_score FROM articles "
-            "WHERE analyzed = 1 AND state = ? AND sentiment_score IS NOT NULL",
+            "SELECT ast.county_fips, ast.county_name, a.sentiment_score "
+            "FROM article_states ast "
+            "JOIN articles a ON a.id = ast.article_id "
+            "WHERE a.analyzed = 1 AND ast.state = ? AND a.sentiment_score IS NOT NULL",
             (state,),
         ).fetchall()
 
-        # Group by county (via geo normalization) or raw location
         county_scores = defaultdict(list)  # county_name -> [scores]
         county_fips_map = {}  # county_name -> fips
         for r in rows:
-            loc = r["location_relevance"] or "statewide"
-            if loc == "statewide":
-                county_scores["statewide"].append(r["sentiment_score"])
-                continue
-            mapping = geo.normalize_location(loc, state)
-            if mapping:
-                county_scores[mapping["county"]].append(r["sentiment_score"])
-                county_fips_map[mapping["county"]] = mapping["fips"]
+            fips = r["county_fips"]
+            name = r["county_name"]
+            if fips and name:
+                county_scores[name].append(r["sentiment_score"])
+                county_fips_map[name] = fips
             else:
-                # Unmapped locations fold into statewide
                 county_scores["statewide"].append(r["sentiment_score"])
 
         result = {}
@@ -508,16 +517,24 @@ def articles():
         limit = request.args.get("limit", 25, type=int)
         offset = request.args.get("offset", 0, type=int)
         location = request.args.get("location", "")
+        county_fips = request.args.get("county_fips", "")
         state = request.args.get("state", "")
         sentiment = request.args.get("sentiment_label", "")
 
         where_clauses = ["analyzed = 1"]
         params = []
 
-        if state:
-            where_clauses.append("state = ?")
+        if county_fips:
+            where_clauses.append(
+                "articles.id IN (SELECT article_id FROM article_states WHERE county_fips = ?)"
+            )
+            params.append(county_fips)
+        elif state:
+            where_clauses.append(
+                "articles.id IN (SELECT article_id FROM article_states WHERE state = ?)"
+            )
             params.append(state)
-        if location:
+        if location and not county_fips:
             where_clauses.append("location_relevance = ?")
             params.append(location)
         if sentiment:
@@ -881,22 +898,44 @@ def article_detail(article_id):
 
 @bp.route("/control/add-article", methods=["POST"])
 def control_add_article():
-    """Manually add a single article."""
+    """Manually add an article by URL. Scrapes metadata automatically."""
+    from scraper import scrape_article_metadata
+    from ingest import check_keyword_match
+    from geo import infer_state_from_text
+
     data = request.get_json(force=True)
-    title = (data.get("title") or "").strip()
-    if not title:
-        return jsonify({"success": False, "error": "Title is required"}), 400
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"success": False, "error": "URL is required"}), 400
+
+    # Scrape metadata from the URL
+    meta = scrape_article_metadata(url)
+    title = meta.get("title") or url
+    full_text = meta.get("full_text") or ""
+    summary = full_text[:500] if full_text else ""
+
+    # Detect state from content
+    state = infer_state_from_text(title, summary)
+    if state == "nationwide":
+        state = None
+
+    # Run keyword matching for score
+    config = load_config()
+    matched_kw, kw_score, kw_state = check_keyword_match(title, summary, config)
+    if kw_state and not state:
+        state = kw_state
 
     article_data = {
-        "source": data.get("source", "Manual Entry").strip(),
-        "source_type": data.get("source_type", "news"),
+        "source": meta.get("source", "Manual Entry"),
+        "source_type": "news",
         "title": title,
-        "url": data.get("url", "").strip() or None,
-        "published_date": data.get("published_date", datetime.utcnow().strftime("%Y-%m-%d")),
-        "full_text": data.get("full_text", ""),
-        "summary": (data.get("full_text") or "")[:500],
-        "matched_keywords": ["manual_entry"],
-        "keyword_score": 1.0,
+        "url": meta.get("url", url),
+        "published_date": meta.get("published_date") or datetime.utcnow().strftime("%Y-%m-%d"),
+        "full_text": full_text,
+        "summary": summary,
+        "matched_keywords": matched_kw or ["manual_entry"],
+        "keyword_score": kw_score if matched_kw else 1.0,
+        "state": state,
     }
 
     conn = get_conn()
@@ -904,7 +943,13 @@ def control_add_article():
         row_id = db.insert_article(conn, article_data)
         if row_id:
             conn.commit()
-            return jsonify({"success": True, "article_id": row_id})
+            return jsonify({
+                "success": True,
+                "article_id": row_id,
+                "title": title,
+                "source": article_data["source"],
+                "state": state,
+            })
         return jsonify({"success": False, "error": "Duplicate article (URL already exists)"}), 409
     finally:
         conn.close()
@@ -949,6 +994,9 @@ def control_run_analysis():
     """Trigger sentiment analysis in background with progress tracking."""
     import analyze
 
+    data = request.get_json(silent=True) or {}
+    limit = data.get("limit") or None  # None = all
+
     task_id = str(uuid.uuid4())[:8]
     with _tasks_lock:
         _tasks[task_id] = {
@@ -968,22 +1016,25 @@ def control_run_analysis():
 
     def _worker():
         try:
-            # Step 1: Scrape full text for thin articles before analysis
-            import scraper
-            conn = get_conn()
-            try:
-                scrape_result = scraper.scrape_thin_articles(conn)
-                logger.info("Scraping: %d scraped, %d failed",
-                            scrape_result.get("scraped", 0),
-                            scrape_result.get("failed", 0))
-            except Exception as e:
-                logger.warning("Scraping step failed (continuing): %s", e)
-            finally:
-                conn.close()
+            scrape_result = {}
+
+            # Step 1: Scrape full text for thin articles (skip when batch-limited)
+            if not limit:
+                import scraper
+                conn = db.get_connection()
+                try:
+                    scrape_result = scraper.scrape_thin_articles(conn)
+                    logger.info("Scraping: %d scraped, %d failed",
+                                scrape_result.get("scraped", 0),
+                                scrape_result.get("failed", 0))
+                except Exception as e:
+                    logger.warning("Scraping step failed (continuing): %s", e)
+                finally:
+                    conn.close()
 
             # Step 2: Run sentiment analysis
-            result = analyze.analyze_articles(progress_callback=_progress)
-            result["scrape_scraped"] = scrape_result.get("scraped", 0) if 'scrape_result' in dir() else 0
+            result = analyze.analyze_articles(limit=limit, progress_callback=_progress)
+            result["scrape_scraped"] = scrape_result.get("scraped", 0)
             with _tasks_lock:
                 _tasks[task_id]["status"] = "completed"
                 _tasks[task_id]["finished"] = datetime.utcnow().isoformat()

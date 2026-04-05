@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ cache_bust }}">
 </head>
 <body>
 
@@ -31,13 +31,13 @@
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
             <span>Articles</span>
         </button>
-        <button class="nav-item" data-page="system" onclick="switchPage('system')">
-            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            <span>System</span>
-        </button>
         <button class="nav-item" data-page="control" onclick="switchPage('control')">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
             <span>Control</span>
+        </button>
+        <button class="nav-item" data-page="system" onclick="switchPage('system')">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            <span>System</span>
         </button>
     </nav>
 
@@ -64,7 +64,20 @@
         </div>
         <div class="page-content">
             <div class="dash-grid">
-                <!-- Map (left, spans 2 rows) -->
+                <!-- Recent Articles (left, spans 2 rows) -->
+                <div class="articles-panel" id="articlesPanel">
+                    <div class="sh">
+                        <span id="articlesPanelTitle">Recent Articles</span>
+                    </div>
+                    <div id="articlesPanelList" class="articles-panel-list">
+                        <div class="no-data">Loading...</div>
+                    </div>
+                    <button class="btn-view-all" id="articlesPanelViewAll" onclick="viewAllArticles()" style="display:none">
+                        View All Articles &rarr;
+                    </button>
+                </div>
+
+                <!-- Map (center, spans 2 rows) -->
                 <div class="map-panel">
                     <div class="sh map-header">
                         <button class="map-back-btn" id="mapBackBtn" onclick="showUSMap()" style="display:none" title="Back to US map">
@@ -102,9 +115,10 @@
                         <span class="m-label">WSI</span>
                         <span class="m-value" id="metricWSI">--</span>
                     </div>
-                    <div class="metric-row">
-                        <span class="m-label">4wk Trend</span>
-                        <span class="m-value sm" id="metricTrend">--</span>
+                    <div class="sh" style="margin-top:var(--sp-sm)">Sentiment Distribution</div>
+                    <div id="sentDistBar" class="sent-dist">
+                        <div class="sent-dist-bar"></div>
+                        <div class="sent-dist-labels"></div>
                     </div>
                 </div>
 
@@ -284,6 +298,19 @@
 
             <div class="sh">Database</div>
             <div class="kv-row" id="dbStats"></div>
+
+            <div id="configSection"></div>
+        </div>
+    </div>
+
+    <!-- PAGE: ARTICLE DETAIL -->
+    <div id="page-article-detail" class="page">
+        <div class="page-header">
+            <button class="btn-action" onclick="showArticleList()" style="margin-right:12px">&larr; BACK</button>
+            <h2 id="articleDetailTitle" style="display:inline;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:0.1em"></h2>
+        </div>
+        <div class="page-content">
+            <div id="articleDetailContent"></div>
         </div>
     </div>
 
@@ -305,22 +332,34 @@
                         <span id="queueSelected">0</span> selected
                     </div>
                     <div class="review-actions">
+                        <div class="select-dropdown-wrap">
+                            <button class="btn-action btn-select" onclick="toggleSelectDropdown(event)">Select &#9662;</button>
+                            <div class="select-dropdown" id="selectDropdown">
+                                <button onclick="queueSelectFiltered('all')">All</button>
+                                <button onclick="queueSelectFiltered('none')">None</button>
+                                <div class="select-dropdown-divider"></div>
+                                <button onclick="queueSelectFiltered('score-4')">Score = 4</button>
+                                <button onclick="queueSelectFiltered('score-5')">Score = 5</button>
+                                <button onclick="queueSelectFiltered('score-6')">Score = 6</button>
+                                <div class="select-dropdown-divider"></div>
+                                <button onclick="queueSelectFiltered('type-rss')">RSS Only</button>
+                                <button onclick="queueSelectFiltered('type-websearch')">Web Only</button>
+                            </div>
+                        </div>
                         <button class="btn-action btn-approve" onclick="approveQueueSelected()">Approve Selected</button>
-                        <button class="btn-action btn-reject" onclick="rejectQueueUnselected()">Reject Unselected</button>
-                        <button class="btn-action" onclick="approveAboveThreshold()" title="Approve all articles with relevance score >= 7">Approve All &ge; 7</button>
-                        <button class="btn-action btn-discard" onclick="clearRejected()">Clear Rejected</button>
+                        <button class="btn-action btn-reject" onclick="rejectQueueSelected()">Reject Selected</button>
                     </div>
                 </div>
                 <div class="queue-scroll-wrap">
                 <table class="dt review-table" id="queueTable" style="display:none">
                     <thead>
                         <tr>
-                            <th style="width:30px"><input type="checkbox" id="queueSelectAll" onchange="toggleAllQueue(this.checked)"></th>
-                            <th style="width:50px">Score</th>
-                            <th>Title</th>
-                            <th>Source</th>
-                            <th>State</th>
-                            <th>Date</th>
+                            <th style="width:30px"><input type="checkbox" id="queueSelectAll" onchange="queueSelectFiltered(this.checked ? 'all' : 'none')"></th>
+                            <th style="width:50px;cursor:pointer;user-select:none" data-sort="relevance_score" onclick="onQueueSort('relevance_score')">Score<span class="sort-arrow"> &#9660;</span></th>
+                            <th style="cursor:pointer;user-select:none" data-sort="title" onclick="onQueueSort('title')">Title<span class="sort-arrow"> &#9650;</span></th>
+                            <th style="cursor:pointer;user-select:none" data-sort="source" onclick="onQueueSort('source')">Source<span class="sort-arrow"> &#9650;</span></th>
+                            <th style="cursor:pointer;user-select:none" data-sort="state" onclick="onQueueSort('state')">State<span class="sort-arrow"> &#9650;</span></th>
+                            <th style="cursor:pointer;user-select:none" data-sort="published_date" onclick="onQueueSort('published_date')">Date<span class="sort-arrow"> &#9650;</span></th>
                             <th>Type</th>
                         </tr>
                     </thead>
@@ -335,7 +374,7 @@
             <div class="control-section" id="analysisQueueSection">
                 <div class="sh">Pending Analysis <span class="queue-stats" id="analysisCount"></span></div>
                 <p class="control-desc" id="analysisDesc">Approved articles awaiting sentiment analysis via Claude API.</p>
-                <div class="queue-scroll-wrap" style="max-height:280px">
+                <div class="queue-scroll-wrap" style="max-height:400px">
                     <table class="dt" id="analysisTable" style="display:none">
                         <thead>
                             <tr>
@@ -350,6 +389,13 @@
                 </div>
                 <div class="no-data" id="analysisEmpty" style="display:none">All articles have been analyzed.</div>
                 <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+                    <select id="analysisBatchSize" style="padding:4px 6px;background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);font-family:var(--font-data);font-size:11px">
+                        <option value="">All</option>
+                        <option value="50">50 articles</option>
+                        <option value="100">100 articles</option>
+                        <option value="250" selected>250 articles</option>
+                        <option value="500">500 articles</option>
+                    </select>
                     <button class="btn-action" id="btnRunAnalysis" onclick="runTask('analysis')">Run Analysis</button>
                     <div class="task-status" id="statusAnalysis"></div>
                 </div>
@@ -393,42 +439,14 @@
             <!-- Manual Article Entry -->
             <div class="control-section">
                 <div class="sh">Manual Article Entry</div>
-                <p class="control-desc">Add an article directly to the database. It will be queued for sentiment analysis.</p>
-                <form class="control-form" id="articleForm" onsubmit="submitArticle(event)">
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Source</label>
-                            <input type="text" id="ctrlSource" placeholder="e.g. Cowboy State Daily">
-                        </div>
-                        <div class="form-group">
-                            <label>Source Type</label>
-                            <select id="ctrlSourceType">
-                                <option value="news">News</option>
-                                <option value="social_media">Social Media</option>
-                                <option value="legislative">Legislative</option>
-                                <option value="opinion">Opinion</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Date</label>
-                            <input type="date" id="ctrlDate">
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>Title <span class="required">*</span></label>
-                        <input type="text" id="ctrlTitle" placeholder="Article title" required>
-                    </div>
-                    <div class="form-group">
-                        <label>URL</label>
-                        <input type="text" id="ctrlUrl" placeholder="https://...">
-                    </div>
-                    <div class="form-group">
-                        <label>Full Text</label>
-                        <textarea id="ctrlText" rows="4" placeholder="Paste article text or summary..."></textarea>
-                    </div>
-                    <button type="submit" class="btn-action" id="btnSubmitArticle">Submit Article</button>
-                    <div class="task-status" id="statusArticle"></div>
-                </form>
+                <p class="control-desc">Paste an article URL to add it. Title, source, date, and text are scraped automatically.</p>
+                <div class="control-form" style="flex-direction:row !important;align-items:center">
+                    <form id="articleForm" onsubmit="submitArticle(event)" style="display:contents">
+                        <input type="url" id="ctrlUrl" placeholder="https://..." required style="flex:1 1 auto;min-width:0">
+                        <button type="submit" class="btn-action" id="btnSubmitArticle">Submit</button>
+                    </form>
+                </div>
+                <div class="task-status" id="statusArticle" style="margin-top:6px"></div>
             </div>
 
             <!-- Operations Grid -->
@@ -481,6 +499,6 @@
 <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
 <script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-<script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+<script src="{{ url_for('static', filename='dashboard.js') }}?v={{ cache_bust }}"></script>
 </body>
 </html>
