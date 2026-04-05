@@ -181,6 +181,14 @@ function escapeHtml(str) {
     return d.innerHTML;
 }
 
+function articleUrl(url, table) {
+    if (!url) return '#';
+    if (url.includes('news.google.com')) {
+        return `/api/resolve-url?url=${encodeURIComponent(url)}&table=${table || 'articles'}`;
+    }
+    return escapeHtml(url);
+}
+
 async function fetchJSON(url) {
     const r = await fetch(url);
     if (!r.ok) throw new Error(`API ${r.status}`);
@@ -1203,7 +1211,7 @@ function renderKeyArticles(articles) {
                 <span class="key-article-meta">${escapeHtml(a.source || '')} \u2014 ${fmtDate(a.published_date)}</span>
                 <span class="pill pill-state">${getStateAbbr(a.state)}</span>
             </div>
-            <div class="key-article-title">${a.url ? `<a href="${a.url}" target="_blank" rel="noopener">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}</div>
+            <div class="key-article-title">${a.url ? `<a href="${articleUrl(a.url)}" target="_blank" rel="noopener">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}</div>
             <div class="key-article-reason">${reason}</div>
             ${a.key_claims ? `<div class="key-article-claims">${escapeHtml(a.key_claims)}</div>` : ''}
         </div>`;
@@ -1332,7 +1340,7 @@ async function renderArticles(append = false) {
                 <tr class="expand-row hidden" id="expand-${idx}">
                     <td colspan="6">
                         <div class="article-detail" data-article-id="${a.id}">
-                            ${a.url ? `<a href="${a.url}" target="_blank" rel="noopener" class="article-detail-url">${escapeHtml(a.url)}</a>` : ''}
+                            ${a.url ? `<a href="${articleUrl(a.url)}" target="_blank" rel="noopener" class="article-detail-url">${escapeHtml(a.url)}</a>` : ''}
                             <div class="article-detail-grid">
                                 <div class="article-detail-section">
                                     <div class="article-detail-label">SENTIMENT</div>
@@ -1674,7 +1682,7 @@ function renderQueueRows() {
         return `<tr style="cursor:pointer" onclick="togglePendingExpand(${a.id}, event)">
             <td><input type="checkbox" class="queue-check" data-id="${a.id}" ${preChecked ? 'checked' : ''} onchange="updateQueueSelectedCount()" onclick="event.stopPropagation()"></td>
             <td><span class="relevance-score ${scoreCls}">${scoreText}</span></td>
-            <td class="text-cell" title="${escapeHtml(a.title)}"><a href="${escapeHtml(a.url || '#')}" target="_blank" rel="noopener" class="article-link" onclick="event.stopPropagation()">${escapeHtml(titleTrunc)}</a></td>
+            <td class="text-cell" title="${escapeHtml(a.title)}"><a href="${articleUrl(a.url, 'pending_articles')}" target="_blank" rel="noopener" class="article-link" onclick="event.stopPropagation()">${escapeHtml(titleTrunc)}</a></td>
             <td>${escapeHtml(a.source || '')}</td>
             <td>${stateAbbr ? `<span class="pill pill-state">${stateAbbr}</span>` : '--'}</td>
             <td>${fmtDate(a.published_date)}</td>
@@ -1684,7 +1692,7 @@ function renderQueueRows() {
             <td colspan="7" class="pending-detail">
                 ${reason ? `<div class="pending-detail-reason"><strong>Relevance:</strong> ${escapeHtml(reason)}</div>` : ''}
                 <div class="pending-detail-summary">${summary}</div>
-                ${a.url ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" class="article-link" style="font-size:10px;word-break:break-all">${escapeHtml(a.url)}</a>` : ''}
+                ${a.url ? `<a href="${articleUrl(a.url, 'pending_articles')}" target="_blank" rel="noopener" class="article-link" style="font-size:10px;word-break:break-all">${escapeHtml(a.url)}</a>` : ''}
             </td>
         </tr>`;
     }).join('');
@@ -1817,7 +1825,7 @@ async function renderAnalysisQueue() {
             const titleTrunc = a.title && a.title.length > 65 ? a.title.substring(0, 62) + '...' : (a.title || '--');
             const stateAbbr = getStateAbbr(a.state);
             return `<tr>
-                <td class="text-cell">${a.url ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" class="article-link">${escapeHtml(titleTrunc)}</a>` : escapeHtml(titleTrunc)}</td>
+                <td class="text-cell">${a.url ? `<a href="${articleUrl(a.url)}" target="_blank" rel="noopener" class="article-link">${escapeHtml(titleTrunc)}</a>` : escapeHtml(titleTrunc)}</td>
                 <td>${escapeHtml(a.source || '')}</td>
                 <td>${fmtDate(a.published_date)}</td>
                 <td>${stateAbbr ? `<span class="pill pill-state">${stateAbbr}</span>` : '--'}</td>
@@ -2156,7 +2164,7 @@ async function showArticleDetail(articleId) {
                 <h2 style="color:var(--text);font-size:1.1rem;margin-bottom:4px">${escapeHtml(data.title)}</h2>
                 <div class="meta-row">
                     ${escapeHtml(data.source || '')} &middot; ${fmtDate(data.published_date)} &middot; ${escapeHtml(data.source_type || '')}
-                    ${data.url ? ` &middot; <a href="${data.url}" target="_blank" rel="noopener" style="color:var(--accent)">Open article &rarr;</a>` : ''}
+                    ${data.url ? ` &middot; <a href="${articleUrl(data.url)}" target="_blank" rel="noopener" style="color:var(--accent)">Open article &rarr;</a>` : ''}
                 </div>
 
                 <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:20px">

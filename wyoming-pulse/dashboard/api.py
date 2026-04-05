@@ -763,6 +763,41 @@ def config_keywords():
     return jsonify(result)
 
 
+@bp.route("/resolve-url")
+def resolve_url():
+    """
+    Lazily resolve a Google News URL and redirect to the real article.
+    Caches the result back to the DB so subsequent clicks are instant.
+    Falls back to the original URL if resolution fails.
+    """
+    from flask import redirect, request as flask_request
+    url = flask_request.args.get("url", "")
+    table = flask_request.args.get("table", "articles")  # articles or pending_articles
+
+    if not url:
+        return jsonify({"error": "No URL provided"}), 400
+
+    if "news.google.com" not in url:
+        return redirect(url)
+
+    from scraper import resolve_google_news_url
+    resolved = resolve_google_news_url(url, interval=1)
+
+    # Cache back to DB if resolved
+    if resolved != url:
+        conn = get_conn()
+        try:
+            if table == "pending_articles":
+                conn.execute("UPDATE pending_articles SET url = ? WHERE url = ?", (resolved, url))
+            else:
+                conn.execute("UPDATE articles SET url = ? WHERE url = ?", (resolved, url))
+            conn.commit()
+        finally:
+            conn.close()
+
+    return redirect(resolved)
+
+
 @bp.route("/article/<int:article_id>")
 def article_detail(article_id):
     """Return full article details for the detail page."""
