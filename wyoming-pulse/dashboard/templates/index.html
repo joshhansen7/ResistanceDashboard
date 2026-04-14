@@ -193,10 +193,10 @@
                 <table class="dt" id="entityTable">
                     <thead>
                         <tr>
-                            <th style="cursor:pointer" onclick="sortEntityTable('name')">Entity</th>
-                            <th style="cursor:pointer" onclick="sortEntityTable('count')">Mentions</th>
-                            <th style="cursor:pointer" onclick="sortEntityTable('avg_sentiment')">Avg Sentiment</th>
-                            <th style="cursor:pointer" onclick="sortEntityTable('trend')">4wk Trend</th>
+                            <th style="cursor:pointer" onclick="sortEntityTable('name')" tabindex="0" role="columnheader button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortEntityTable('name')}">Entity</th>
+                            <th style="cursor:pointer" onclick="sortEntityTable('count')" tabindex="0" role="columnheader button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortEntityTable('count')}">Mentions</th>
+                            <th style="cursor:pointer" onclick="sortEntityTable('avg_sentiment')" tabindex="0" role="columnheader button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortEntityTable('avg_sentiment')}">Avg Sentiment</th>
+                            <th style="cursor:pointer" onclick="sortEntityTable('trend')" tabindex="0" role="columnheader button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortEntityTable('trend')}">4wk Trend</th>
                         </tr>
                     </thead>
                     <tbody id="entityBody"></tbody>
@@ -355,11 +355,11 @@
                     <thead>
                         <tr>
                             <th style="width:30px"><input type="checkbox" id="queueSelectAll" onchange="queueSelectFiltered(this.checked ? 'all' : 'none')"></th>
-                            <th style="width:50px;cursor:pointer;user-select:none" data-sort="relevance_score" onclick="onQueueSort('relevance_score')">Score<span class="sort-arrow"> &#9660;</span></th>
-                            <th style="cursor:pointer;user-select:none" data-sort="title" onclick="onQueueSort('title')">Title<span class="sort-arrow"> &#9650;</span></th>
-                            <th style="cursor:pointer;user-select:none" data-sort="source" onclick="onQueueSort('source')">Source<span class="sort-arrow"> &#9650;</span></th>
-                            <th style="cursor:pointer;user-select:none" data-sort="state" onclick="onQueueSort('state')">State<span class="sort-arrow"> &#9650;</span></th>
-                            <th style="cursor:pointer;user-select:none" data-sort="published_date" onclick="onQueueSort('published_date')">Date<span class="sort-arrow"> &#9650;</span></th>
+                            <th style="width:50px;cursor:pointer;user-select:none" data-sort="relevance_score" onclick="onQueueSort('relevance_score')" tabindex="0" role="columnheader button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();onQueueSort('relevance_score')}">Score<span class="sort-arrow"> &#9660;</span></th>
+                            <th style="cursor:pointer;user-select:none" data-sort="title" onclick="onQueueSort('title')" tabindex="0" role="columnheader button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();onQueueSort('title')}">Title<span class="sort-arrow"> &#9650;</span></th>
+                            <th style="cursor:pointer;user-select:none" data-sort="source" onclick="onQueueSort('source')" tabindex="0" role="columnheader button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();onQueueSort('source')}">Source<span class="sort-arrow"> &#9650;</span></th>
+                            <th style="cursor:pointer;user-select:none" data-sort="state" onclick="onQueueSort('state')" tabindex="0" role="columnheader button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();onQueueSort('state')}">State<span class="sort-arrow"> &#9650;</span></th>
+                            <th style="cursor:pointer;user-select:none" data-sort="published_date" onclick="onQueueSort('published_date')" tabindex="0" role="columnheader button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();onQueueSort('published_date')}">Date<span class="sort-arrow"> &#9650;</span></th>
                             <th>Type</th>
                         </tr>
                     </thead>
@@ -433,6 +433,58 @@
                         </div>
                     </div>
                     <div class="task-status" id="statusWebsearch"></div>
+                </div>
+            </div>
+
+            <!-- State Sweep -->
+            <div class="control-section">
+                <div class="sh">State Sweep</div>
+                <p class="control-desc">Run template queries across all 50 US states to ensure even coverage. This is the primary tool for systematic article discovery.</p>
+                <div class="control-form">
+                    <div class="form-row" style="grid-template-columns: 1fr 1fr 1fr auto;">
+                        <div class="form-group">
+                            <label>Time Range</label>
+                            <select id="ctrlSweepDays">
+                                <option value="1">Last 1 day</option>
+                                <option value="3">Last 3 days</option>
+                                <option value="7" selected>Last 7 days</option>
+                                <option value="14">Last 14 days</option>
+                                <option value="30">Last 30 days</option>
+                                <option value="60">Last 60 days</option>
+                                <option value="90">Last 90 days</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>State <span style="color:var(--text-muted);font-weight:normal">(optional)</span></label>
+                            <select id="ctrlSweepState">
+                                <option value="">All 50 States</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="ctrlSweepAnalyze" checked style="margin-right:4px;vertical-align:middle">
+                                Run analysis after
+                            </label>
+                        </div>
+                        <div class="form-group" style="justify-content: flex-end;">
+                            <label>&nbsp;</label>
+                            <button type="button" class="btn-action" id="btnSweep" onclick="runStateSweep()">Run Sweep</button>
+                        </div>
+                    </div>
+                    <details style="margin-top:8px">
+                        <summary style="color:var(--text-muted);font-size:0.8rem;cursor:pointer">Advanced: Date range override</summary>
+                        <div class="form-row" style="grid-template-columns: 1fr 1fr; margin-top:6px;">
+                            <div class="form-group">
+                                <label>Start Date</label>
+                                <input type="date" id="ctrlSweepStart">
+                            </div>
+                            <div class="form-group">
+                                <label>End Date</label>
+                                <input type="date" id="ctrlSweepEnd">
+                            </div>
+                        </div>
+                    </details>
+                    <div class="task-status" id="statusSweep"></div>
                 </div>
             </div>
 

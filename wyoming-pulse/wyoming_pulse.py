@@ -12,12 +12,15 @@ Usage:
   python wyoming_pulse.py run             Full pipeline: ingest → analyze → digest (if due)
   python wyoming_pulse.py manual          Launch manual input tool
   python wyoming_pulse.py backfill        Ingest + analyze all, generate baseline digest
+  python wyoming_pulse.py sweep           Per-state sweep: search all 50 states systematically
+  python wyoming_pulse.py sweep --days 30 --state ohio
+  python wyoming_pulse.py sweep --start 2025-06-01 --end 2025-12-31
 """
 
 import argparse
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -30,6 +33,7 @@ import ingest
 import analyze
 import digest
 import manual_input
+import websearch
 import historical_backfill
 
 
@@ -161,7 +165,7 @@ def cmd_run(args):
 
     if row:
         last_end = datetime.fromisoformat(row["period_end"])
-        days_since = (datetime.utcnow() - last_end).days
+        days_since = (datetime.now(timezone.utc).replace(tzinfo=None) - last_end).days
         if days_since >= 14:
             print(f"  Last digest ended {days_since} days ago. Generating new digest...")
             cmd_digest(args)
@@ -210,7 +214,7 @@ def cmd_backfill(args):
 
     # Generate baseline digest covering Jan 1, 2026 to today
     print("\n--- Generating baseline digest ---")
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
     digest.generate_digest(start_date="2026-01-01", end_date=today)
 
     print("\n✅ Backfill complete!")
@@ -246,6 +250,59 @@ def cmd_historical_backfill(args):
         print("\n  (Dry run — no changes were made)")
 
     print("\n✅ Historical backfill complete!")
+
+
+def cmd_sweep(args):
+    """Per-state sweep: search all 50 states with template queries."""
+    print("\n🔍 Wyoming Pulse — Per-State Sweep")
+    print("=" * 40)
+
+    days_back = getattr(args, "days_back", 7)
+    start_date = getattr(args, "start_date", None)
+    end_date = getattr(args, "end_date", None)
+    state_filter = getattr(args, "state", None)
+    dry_run = getattr(args, "dry_run", False)
+    skip_analysis = getattr(args, "skip_analysis", False)
+
+    if start_date:
+        print(f"  Date range: {start_date} to {end_date or 'now'}")
+    else:
+        print(f"  Looking back: {days_back} days")
+    if state_filter:
+        print(f"  State: {state_filter}")
+    else:
+        print(f"  Scope: all 50 states")
+    if dry_run:
+        print(f"  Mode: DRY RUN (no DB writes or API calls)")
+    print()
+
+    result = websearch.run_websearch(
+        per_state=True,
+        days_back=days_back,
+        start_date=start_date,
+        end_date=end_date,
+        state=state_filter,
+        skip_analysis=skip_analysis,
+    )
+
+    if result.get("error"):
+        print(f"\nError: {result['error']}")
+        return
+
+    print(f"\nResults:")
+    print(f"  States searched:   {result.get('states_searched', 0)}")
+    print(f"  Total results:     {result['total_results']}")
+    print(f"  New articles:      {result['new_articles']}")
+    print(f"  Skipped (URL):     {result['skipped_url']}")
+    print(f"  Skipped (title):   {result['skipped_title']}")
+    if result.get('skipped_progress'):
+        print(f"  Skipped (resumed): {result['skipped_progress']}")
+    print(f"  Scored:            {result['scored']}")
+    print(f"  Auto-approved:     {result['auto_approved']}")
+    if result.get('analyzed'):
+        print(f"  Analyzed:          {result['analyzed']}")
+
+    print("\n✅ Sweep complete!")
 
 
 def main():
@@ -289,6 +346,36 @@ def main():
 
     # backfill
     subparsers.add_parser("backfill", help="Ingest + analyze all + baseline digest")
+
+    # sweep
+    sweep_parser = subparsers.add_parser(
+        "sweep",
+        help="Per-state sweep: search all 50 states with template queries",
+    )
+    sweep_parser.add_argument(
+        "--days", dest="days_back", default=7, type=int,
+        help="Days to look back (default: 7)",
+    )
+    sweep_parser.add_argument(
+        "--start", dest="start_date", default=None,
+        help="Start date (YYYY-MM-DD, overrides --days)",
+    )
+    sweep_parser.add_argument(
+        "--end", dest="end_date", default=None,
+        help="End date (YYYY-MM-DD, used with --start)",
+    )
+    sweep_parser.add_argument(
+        "--state", default=None,
+        help="Limit to one state (e.g. ohio, 'north dakota')",
+    )
+    sweep_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Fetch and match but don't write to DB or call API",
+    )
+    sweep_parser.add_argument(
+        "--skip-analysis", action="store_true",
+        help="Don't run sentiment analysis after inserting articles",
+    )
 
     # historical-backfill
     hb_parser = subparsers.add_parser(
@@ -335,6 +422,7 @@ def main():
         "dashboard": cmd_dashboard,
         "manual": cmd_manual,
         "backfill": cmd_backfill,
+        "sweep": cmd_sweep,
         "historical-backfill": cmd_historical_backfill,
     }
 

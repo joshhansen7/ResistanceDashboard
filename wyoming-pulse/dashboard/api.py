@@ -9,7 +9,8 @@ import threading
 import traceback
 import uuid
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from functools import wraps
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 
@@ -21,6 +22,17 @@ from shared import load_config
 logger = logging.getLogger("wyoming_pulse.api")
 
 bp = Blueprint("api", __name__, url_prefix="/api")
+
+
+def local_only(f):
+    """Reject requests not originating from localhost."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        remote = request.remote_addr or ""
+        if remote not in ("127.0.0.1", "::1", "localhost"):
+            return jsonify({"error": "forbidden: local access only"}), 403
+        return f(*args, **kwargs)
+    return wrapper
 
 # ──────────────────────────────────────────────
 # Background task runner
@@ -37,24 +49,30 @@ def _run_in_background(task_type, target_fn, **kwargs):
             "task_id": task_id,
             "type": task_type,
             "status": "running",
-            "started": datetime.utcnow().isoformat(),
+            "started": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "finished": None,
             "result": None,
             "error": None,
         }
+        # Prune old tasks to prevent unbounded memory growth
+        if len(_tasks) > 50:
+            # Remove oldest entries by start time, keep most recent 50
+            sorted_ids = sorted(_tasks, key=lambda k: _tasks[k].get("started", ""))
+            for old_id in sorted_ids[:-50]:
+                del _tasks[old_id]
 
     def _worker():
         try:
             result = target_fn(**kwargs)
             with _tasks_lock:
                 _tasks[task_id]["status"] = "completed"
-                _tasks[task_id]["finished"] = datetime.utcnow().isoformat()
+                _tasks[task_id]["finished"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 _tasks[task_id]["result"] = result
         except Exception as e:
             logger.error("Task %s (%s) failed: %s", task_id, task_type, e)
             with _tasks_lock:
                 _tasks[task_id]["status"] = "error"
-                _tasks[task_id]["finished"] = datetime.utcnow().isoformat()
+                _tasks[task_id]["finished"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 _tasks[task_id]["error"] = str(e)
 
     t = threading.Thread(target=_worker, daemon=True)
@@ -67,29 +85,56 @@ def get_conn():
     return db.get_connection(current_app.config["DB_PATH"])
 
 
+def _safe_json_loads(value, default):
+    """Safely parse a JSON column value; return default on failure or empty."""
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def fips_pair(fips):
+    """Return (unpadded, padded) tuple for FIPS code matching across both formats in DB."""
+    s = str(fips).strip()
+    return (s.lstrip("0") or "0", s.zfill(5))
+
+
 # ──────────────────────────────────────────────
 # /api/overview
 # ──────────────────────────────────────────────
-def _state_filter(base_where="analyzed = 1"):
-    """Build WHERE clause and params with optional ?state= and ?county_fips= filters.
-    Uses article_states junction table so multi-state articles count
-    for all their states. county_fips takes precedence over state.
+def _state_filter(include_analyzed=True):
+    """Build WHERE clauses and params with optional ?state= and ?county_fips= filters.
+
+    Returns (where_sql, params) where where_sql is a composed WHERE clause string.
+    When include_analyzed is True, includes the `analyzed = 1` predicate; when
+    False, omits it (used by callers that need to count both analyzed and
+    pending rows). Uses the article_states junction table so multi-state
+    articles count for all their states. county_fips takes precedence over state.
     """
+    clauses = []
+    params = []
+    if include_analyzed:
+        clauses.append("analyzed = 1")
+
     county_fips = request.args.get("county_fips")
     if county_fips:
-        return (
-            f"{base_where} AND articles.id IN "
-            f"(SELECT article_id FROM article_states WHERE county_fips = ?)",
-            [county_fips],
+        fips_unpadded, fips_padded = fips_pair(county_fips)
+        clauses.append(
+            "articles.id IN (SELECT article_id FROM article_states WHERE county_fips IN (?, ?))"
         )
-    state = request.args.get("state")
-    if state:
-        return (
-            f"{base_where} AND articles.id IN "
-            f"(SELECT article_id FROM article_states WHERE state = ?)",
-            [state],
-        )
-    return base_where, []
+        params.extend([fips_unpadded, fips_padded])
+    else:
+        state = request.args.get("state")
+        if state:
+            clauses.append(
+                "articles.id IN (SELECT article_id FROM article_states WHERE state = ?)"
+            )
+            params.append(state)
+
+    where_sql = " AND ".join(clauses) if clauses else "1=1"
+    return where_sql, params
 
 
 @bp.route("/overview")
@@ -97,7 +142,7 @@ def overview():
     conn = get_conn()
     try:
         where, params = _state_filter()
-        base_where = where.replace("analyzed = 1", "1=1")  # for total (includes unanalyzed)
+        base_where, _ = _state_filter(include_analyzed=False)  # for total (includes unanalyzed)
 
         total = conn.execute(
             f"SELECT COUNT(*) as c FROM articles WHERE {base_where}", params
@@ -113,7 +158,7 @@ def overview():
         avg_sentiment = round(avg_row["avg"], 2) if avg_row["avg"] else None
 
         # Period comparison: last 14 days vs previous 14 days
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         current_start = (now - timedelta(days=14)).isoformat()
         prev_start = (now - timedelta(days=28)).isoformat()
         prev_end = current_start
@@ -234,11 +279,11 @@ def state_locations():
 def sentiment_trend():
     conn = get_conn()
     try:
-        where, params = _state_filter("analyzed = 1 AND published_date IS NOT NULL")
+        where, params = _state_filter()
         rows = conn.execute(
             f"SELECT DATE(published_date) as date, "
             f"AVG(sentiment_score) as avg, COUNT(*) as count "
-            f"FROM articles WHERE {where} "
+            f"FROM articles WHERE {where} AND published_date IS NOT NULL "
             f"GROUP BY DATE(published_date) ORDER BY date ASC",
             params,
         ).fetchall()
@@ -357,7 +402,7 @@ def locations():
                 "count": len(scores),
             }
             if name in county_fips_map:
-                entry["fips"] = county_fips_map[name]
+                entry["fips"] = county_fips_map[name].zfill(5)
             result[name] = entry
         return jsonify(result)
     finally:
@@ -379,7 +424,7 @@ def topics():
 
         topic_data = defaultdict(lambda: {"scores": [], "count": 0})
         for row in rows:
-            tags = json.loads(row["topic_tags"]) if row["topic_tags"] else []
+            tags = _safe_json_loads(row["topic_tags"], [])
             for tag in tags:
                 topic_data[tag]["count"] += 1
                 if row["sentiment_score"] is not None:
@@ -408,25 +453,30 @@ def entities():
             params,
         ).fetchall()
 
-        cutoff_28d = (datetime.utcnow() - timedelta(days=28)).isoformat()
-        entity_data = defaultdict(lambda: {"count": 0, "scores": [], "recent_scores": []})
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        recent_cutoff = (now - timedelta(days=14)).isoformat()
+        prior_cutoff = (now - timedelta(days=28)).isoformat()
+        entity_data = defaultdict(lambda: {"count": 0, "scores": [], "recent_scores": [], "prior_scores": []})
         for row in rows:
-            ents = json.loads(row["entities_mentioned"]) if row["entities_mentioned"] else []
+            ents = _safe_json_loads(row["entities_mentioned"], [])
             pub = row["published_date"] or ""
             for e in ents:
                 entity_data[e]["count"] += 1
                 if row["sentiment_score"] is not None:
                     entity_data[e]["scores"].append(row["sentiment_score"])
-                    if pub >= cutoff_28d:
+                    if pub >= recent_cutoff:
                         entity_data[e]["recent_scores"].append(row["sentiment_score"])
+                    elif pub >= prior_cutoff:
+                        entity_data[e]["prior_scores"].append(row["sentiment_score"])
 
         entities_list = []
         for name, data in sorted(entity_data.items(), key=lambda x: x[1]["count"], reverse=True):
             avg = round(sum(data["scores"]) / len(data["scores"]), 2) if data["scores"] else None
             recent_avg = round(sum(data["recent_scores"]) / len(data["recent_scores"]), 2) if data["recent_scores"] else None
+            prior_avg = round(sum(data["prior_scores"]) / len(data["prior_scores"]), 2) if data["prior_scores"] else None
             trend = None
-            if avg is not None and recent_avg is not None:
-                trend = round(recent_avg - avg, 2)
+            if recent_avg is not None and prior_avg is not None:
+                trend = round(recent_avg - prior_avg, 2)
             entities_list.append({
                 "name": name, "count": data["count"],
                 "avg_sentiment": avg, "recent_avg": recent_avg,
@@ -448,35 +498,33 @@ def location_weekly():
     try:
         weeks_back = request.args.get("weeks_back", 12, type=int)
         rows = conn.execute(
-            "SELECT state, location_relevance, published_date, sentiment_score "
-            "FROM articles WHERE analyzed = 1 AND published_date IS NOT NULL "
-            "AND state IS NOT NULL "
-            "ORDER BY published_date ASC"
+            "SELECT ast.state as state, ast.county_name as county_name, "
+            "a.published_date as published_date, a.sentiment_score as sentiment_score "
+            "FROM article_states ast "
+            "JOIN articles a ON a.id = ast.article_id "
+            "WHERE a.analyzed = 1 AND a.published_date IS NOT NULL "
+            "AND ast.state IS NOT NULL "
+            "ORDER BY a.published_date ASC"
         ).fetchall()
 
-        # Group by state > county (normalized) > week
+        # Group by state > county > week. Use county_name from the junction
+        # table directly (already normalized at ingest time) — do NOT call
+        # geo.normalize_location here, as it can trigger HTTP geocoding.
         from sentiment_index import _week_start
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
         data = {}  # {state: {county: {week: [scores]}}}
         for r in rows:
             state = r["state"]
-            loc = r["location_relevance"] or "statewide"
+            loc = r["county_name"] or "statewide"
             ws = _week_start(r["published_date"])
             if not ws or not state:
                 continue
-            # Normalize place names to county level; fold unmapped into statewide
-            if loc != "statewide":
-                mapping = geo.normalize_location(loc, state)
-                if mapping:
-                    loc = mapping["county"]
-                else:
-                    loc = "statewide"
             data.setdefault(state, {}).setdefault(loc, {}).setdefault(ws, [])
             if r["sentiment_score"] is not None:
                 data[state][loc][ws].append(r["sentiment_score"])
 
         # Build week range
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         current_monday = now - timedelta(days=now.weekday())
         cutoff_monday = current_monday - timedelta(weeks=weeks_back)
         weeks = []
@@ -514,26 +562,35 @@ def location_weekly():
 def articles():
     conn = get_conn()
     try:
-        limit = request.args.get("limit", 25, type=int)
-        offset = request.args.get("offset", 0, type=int)
+        limit = max(1, min(int(request.args.get("limit", 25)), 500))
+        offset = max(0, int(request.args.get("offset", 0)))
         location = request.args.get("location", "")
         county_fips = request.args.get("county_fips", "")
         state = request.args.get("state", "")
         sentiment = request.args.get("sentiment_label", "")
+        relevance = request.args.get("relevance", "")  # "primary" | "mentioned" | ""
 
         where_clauses = ["analyzed = 1"]
         params = []
 
+        rel_filter_sql = ""
+        rel_filter_params = []
+        if relevance in ("primary", "mentioned"):
+            rel_filter_sql = " AND relevance = ?"
+            rel_filter_params = [relevance]
+
         if county_fips:
+            fips_unpadded, fips_padded = fips_pair(county_fips)
             where_clauses.append(
-                "articles.id IN (SELECT article_id FROM article_states WHERE county_fips = ?)"
+                "articles.id IN (SELECT article_id FROM article_states WHERE county_fips IN (?, ?)" + rel_filter_sql + ")"
             )
-            params.append(county_fips)
+            params.extend([fips_unpadded, fips_padded] + rel_filter_params)
         elif state:
             where_clauses.append(
-                "articles.id IN (SELECT article_id FROM article_states WHERE state = ?)"
+                "articles.id IN (SELECT article_id FROM article_states WHERE state = ?" + rel_filter_sql + ")"
             )
             params.append(state)
+            params.extend(rel_filter_params)
         if location and not county_fips:
             where_clauses.append("location_relevance = ?")
             params.append(location)
@@ -556,9 +613,36 @@ def articles():
             params + [limit, offset],
         ).fetchall()
 
+        # If filtering by state/county, look up each article's relevance to
+        # that state so the frontend can show "Primary" vs "Mentioned" badges.
+        filter_relevance = {}  # article_id -> "primary" | "mentioned"
+        if state or county_fips:
+            article_ids = [r["id"] for r in rows]
+            if article_ids:
+                placeholders = ",".join("?" * len(article_ids))
+                if county_fips:
+                    fips_unpadded, fips_padded = fips_pair(county_fips)
+                    rel_rows = conn.execute(
+                        f"SELECT article_id, relevance FROM article_states "
+                        f"WHERE article_id IN ({placeholders}) AND county_fips IN (?, ?)",
+                        article_ids + [fips_unpadded, fips_padded],
+                    ).fetchall()
+                else:
+                    rel_rows = conn.execute(
+                        f"SELECT article_id, relevance FROM article_states "
+                        f"WHERE article_id IN ({placeholders}) AND state = ?",
+                        article_ids + [state],
+                    ).fetchall()
+                for rr in rel_rows:
+                    aid = rr["article_id"]
+                    rel = rr["relevance"]
+                    # "primary" wins over "mentioned" if multiple entries
+                    if filter_relevance.get(aid) != "primary":
+                        filter_relevance[aid] = rel
+
         articles_list = []
         for r in rows:
-            articles_list.append({
+            article = {
                 "id": r["id"],
                 "title": r["title"],
                 "source": r["source"],
@@ -572,10 +656,13 @@ def articles():
                 "url": r["url"],
                 "key_claims": r["key_claims"],
                 "sentiment_justification": r["sentiment_justification"],
-                "topic_tags": json.loads(r["topic_tags"]) if r["topic_tags"] else [],
-                "entities_mentioned": json.loads(r["entities_mentioned"]) if r["entities_mentioned"] else [],
+                "topic_tags": _safe_json_loads(r["topic_tags"], []),
+                "entities_mentioned": _safe_json_loads(r["entities_mentioned"], []),
                 "summary": r["summary"],
-            })
+            }
+            if filter_relevance:
+                article["state_relevance"] = filter_relevance.get(r["id"], "primary")
+            articles_list.append(article)
 
         return jsonify({
             "articles": articles_list,
@@ -591,6 +678,7 @@ def articles():
 # PUT /api/articles/<id>  — edit an article's categorisations
 # ──────────────────────────────────────────────
 @bp.route("/articles/<int:article_id>", methods=["PUT"])
+@local_only
 def update_article(article_id):
     """Update editable fields on an article."""
     data = request.get_json(force=True)
@@ -612,8 +700,20 @@ def update_article(article_id):
         for key, val in data.items():
             if key not in allowed:
                 continue
-            if key in ("topic_tags", "entities_mentioned"):
+            if key == "sentiment_score":
+                if val is None or isinstance(val, bool) or not isinstance(val, (int, float)):
+                    return jsonify({"error": "sentiment_score must be a number between 1.0 and 5.0"}), 400
+                if not (1.0 <= float(val) <= 5.0):
+                    return jsonify({"error": "sentiment_score must be between 1.0 and 5.0"}), 400
+                val = float(val)
+            elif key in ("topic_tags", "entities_mentioned"):
+                if val is not None and not isinstance(val, (list, str)):
+                    return jsonify({"error": f"{key} must be a list"}), 400
                 val = json.dumps(val) if isinstance(val, list) else val
+            elif key in ("sentiment_label", "voice_type", "state", "location_relevance",
+                         "key_claims", "sentiment_justification"):
+                if val is not None and not isinstance(val, str):
+                    return jsonify({"error": f"{key} must be a string"}), 400
             sets.append(f"{key} = ?")
             params.append(val)
 
@@ -631,6 +731,7 @@ def update_article(article_id):
 
 
 @bp.route("/articles/<int:article_id>", methods=["DELETE"])
+@local_only
 def delete_article(article_id):
     """Permanently delete an article from the database."""
     conn = get_conn()
@@ -787,6 +888,7 @@ def resolve_url():
     Caches the result back to the DB so subsequent clicks are instant.
     Falls back to the original URL if resolution fails.
     """
+    from urllib.parse import urlparse
     from flask import redirect, request as flask_request
     url = flask_request.args.get("url", "")
     table = flask_request.args.get("table", "articles")  # articles or pending_articles
@@ -794,7 +896,27 @@ def resolve_url():
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
-    if "news.google.com" not in url:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return jsonify({"error": "Invalid URL scheme"}), 400
+
+    def _url_in_db(u):
+        c = get_conn()
+        try:
+            r1 = c.execute("SELECT 1 FROM articles WHERE url = ? LIMIT 1", (u,)).fetchone()
+            if r1:
+                return True
+            r2 = c.execute("SELECT 1 FROM pending_articles WHERE url = ? LIMIT 1", (u,)).fetchone()
+            return bool(r2)
+        finally:
+            c.close()
+
+    is_google_news = parsed.hostname == "news.google.com"
+
+    # If not Google News, only redirect if we know about this URL in our DB
+    if not is_google_news:
+        if not _url_in_db(url):
+            return jsonify({"error": "URL not found in database"}), 400
         return redirect(url)
 
     # Look up the title for DDG fallback
@@ -818,6 +940,11 @@ def resolve_url():
 
     from scraper import resolve_google_news_url
     resolved = resolve_google_news_url(url, interval=1, title=title, source=source)
+
+    # Validate resolved URL scheme to ensure safe redirect
+    resolved_parsed = urlparse(resolved)
+    if resolved_parsed.scheme not in ("http", "https"):
+        return jsonify({"error": "Resolver returned invalid URL"}), 400
 
     # Cache back to DB if resolved
     if resolved != url:
@@ -846,9 +973,9 @@ def article_detail(article_id):
             return jsonify({"error": "Article not found"}), 404
 
         # Parse JSON fields
-        topic_tags = json.loads(row["topic_tags"]) if row["topic_tags"] else []
-        entities = json.loads(row["entities_mentioned"]) if row["entities_mentioned"] else []
-        locations = json.loads(row["locations_json"]) if row["locations_json"] else []
+        topic_tags = _safe_json_loads(row["topic_tags"], [])
+        entities = _safe_json_loads(row["entities_mentioned"], [])
+        locations = _safe_json_loads(row["locations_json"], [])
 
         # Get location details from article_states
         state_rows = conn.execute(
@@ -897,6 +1024,7 @@ def article_detail(article_id):
 # ──────────────────────────────────────────────
 
 @bp.route("/control/add-article", methods=["POST"])
+@local_only
 def control_add_article():
     """Manually add an article by URL. Scrapes metadata automatically."""
     from scraper import scrape_article_metadata
@@ -930,7 +1058,7 @@ def control_add_article():
         "source_type": "news",
         "title": title,
         "url": meta.get("url", url),
-        "published_date": meta.get("published_date") or datetime.utcnow().strftime("%Y-%m-%d"),
+        "published_date": meta.get("published_date") or datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d"),
         "full_text": full_text,
         "summary": summary,
         "matched_keywords": matched_kw or ["manual_entry"],
@@ -982,6 +1110,7 @@ def control_unanalyzed():
 
 
 @bp.route("/control/run-ingest", methods=["POST"])
+@local_only
 def control_run_ingest():
     """Trigger RSS feed ingestion in background."""
     import ingest
@@ -990,6 +1119,7 @@ def control_run_ingest():
 
 
 @bp.route("/control/run-analysis", methods=["POST"])
+@local_only
 def control_run_analysis():
     """Trigger sentiment analysis in background with progress tracking."""
     import analyze
@@ -997,13 +1127,14 @@ def control_run_analysis():
     data = request.get_json(silent=True) or {}
     limit = data.get("limit") or None  # None = all
 
+    db_path = current_app.config["DB_PATH"]
     task_id = str(uuid.uuid4())[:8]
     with _tasks_lock:
         _tasks[task_id] = {
             "task_id": task_id,
             "type": "analysis",
             "status": "running",
-            "started": datetime.utcnow().isoformat(),
+            "started": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "finished": None,
             "result": None,
             "error": None,
@@ -1021,7 +1152,7 @@ def control_run_analysis():
             # Step 1: Scrape full text for thin articles (skip when batch-limited)
             if not limit:
                 import scraper
-                conn = db.get_connection()
+                conn = db.get_connection(db_path)
                 try:
                     scrape_result = scraper.scrape_thin_articles(conn)
                     logger.info("Scraping: %d scraped, %d failed",
@@ -1037,13 +1168,13 @@ def control_run_analysis():
             result["scrape_scraped"] = scrape_result.get("scraped", 0)
             with _tasks_lock:
                 _tasks[task_id]["status"] = "completed"
-                _tasks[task_id]["finished"] = datetime.utcnow().isoformat()
+                _tasks[task_id]["finished"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 _tasks[task_id]["result"] = result
         except Exception as e:
             logger.error("Task %s (analysis) failed: %s", task_id, e)
             with _tasks_lock:
                 _tasks[task_id]["status"] = "error"
-                _tasks[task_id]["finished"] = datetime.utcnow().isoformat()
+                _tasks[task_id]["finished"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 _tasks[task_id]["error"] = str(e)
 
     t = threading.Thread(target=_worker, daemon=True)
@@ -1052,6 +1183,7 @@ def control_run_analysis():
 
 
 @bp.route("/control/run-digest", methods=["POST"])
+@local_only
 def control_run_digest():
     """Trigger digest generation in background."""
     import digest
@@ -1060,6 +1192,7 @@ def control_run_digest():
 
 
 @bp.route("/control/run-websearch", methods=["POST"])
+@local_only
 def control_run_websearch():
     """Trigger web search with optional query, date range, and state."""
     import websearch
@@ -1073,6 +1206,28 @@ def control_run_websearch():
         days_back = 30
     task_id = _run_in_background("websearch", websearch.run_websearch,
                                   query=query, days_back=days_back, state=state)
+    return jsonify({"task_id": task_id})
+
+
+@bp.route("/control/run-sweep", methods=["POST"])
+@local_only
+def control_run_sweep():
+    """Trigger per-state sweep: template queries × all 50 states."""
+    import websearch
+    data = request.get_json(silent=True) or {}
+    state = (data.get("state") or "").strip() or None
+    days_back = data.get("days_back", 7)
+    start_date = (data.get("start_date") or "").strip() or None
+    end_date = (data.get("end_date") or "").strip() or None
+    skip_analysis = bool(data.get("skip_analysis", False))
+    try:
+        days_back = int(days_back)
+    except (ValueError, TypeError):
+        days_back = 7
+    task_id = _run_in_background("sweep", websearch.run_websearch,
+                                  per_state=True, days_back=days_back,
+                                  start_date=start_date, end_date=end_date,
+                                  state=state, skip_analysis=skip_analysis)
     return jsonify({"task_id": task_id})
 
 
@@ -1103,6 +1258,7 @@ def control_pending_batches():
 
 
 @bp.route("/control/discard-batch", methods=["POST"])
+@local_only
 def control_discard_batch():
     """Reject all pending articles in a batch by search_id."""
     data = request.get_json(force=True)
@@ -1158,7 +1314,7 @@ def control_pending():
                 "url": r["url"],
                 "published_date": r["published_date"],
                 "summary": r["summary"],
-                "matched_keywords": json.loads(r["matched_keywords"]) if r["matched_keywords"] else [],
+                "matched_keywords": _safe_json_loads(r["matched_keywords"], []),
                 "keyword_score": r["keyword_score"],
                 "location_relevance": r["location_relevance"],
                 "relevance_score": r["relevance_score"],
@@ -1181,6 +1337,7 @@ def control_pending():
 
 
 @bp.route("/control/approve", methods=["POST"])
+@local_only
 def control_approve():
     """Approve selected pending articles — move to main articles table."""
     data = request.get_json(force=True)
@@ -1196,6 +1353,7 @@ def control_approve():
 
 
 @bp.route("/control/approve-above", methods=["POST"])
+@local_only
 def control_approve_above():
     """Approve all pending articles with relevance score >= threshold."""
     data = request.get_json(force=True)
@@ -1221,6 +1379,7 @@ def control_approve_above():
 
 
 @bp.route("/control/reject", methods=["POST"])
+@local_only
 def control_reject():
     """Reject selected pending articles."""
     data = request.get_json(force=True)
@@ -1236,6 +1395,7 @@ def control_reject():
 
 
 @bp.route("/control/clear-pending", methods=["POST"])
+@local_only
 def control_clear_pending():
     """Clear resolved pending articles."""
     conn = get_conn()

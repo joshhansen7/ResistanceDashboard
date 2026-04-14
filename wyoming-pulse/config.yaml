@@ -209,6 +209,17 @@ nationwide:
       - "nuclear restart"
       - "advanced reactor"
 
+  # ── Sweep query templates (used by per-state sweep mode) ──
+  # Each template is run once per US state, with the state name appended.
+  # Keep this list short and high-signal — 6 templates × 50 states = 300 queries.
+  sweep_queries:
+    - '"data center"'
+    - '"data center" construction OR development OR proposed'
+    - '"data center" opposition OR moratorium OR ban'
+    - 'hyperscale OR "AI infrastructure" OR "server farm"'
+    - '"data center" energy OR power OR grid'
+    - '"data center" tax OR incentive OR zoning'
+
   # ── Nationwide web search queries ──
   # Organized in tiers: core discovery, company/project, regional, thematic
   web_search_queries:
@@ -394,7 +405,8 @@ local_llm:
 # Pipeline settings
 # ──────────────────────────────────────────────
 pipeline:
-  auto_approve_threshold: null  # null = disabled. Set 7-10 to auto-approve above threshold.
+  auto_approve_threshold: 7     # Auto-approve articles scoring 7+
+  auto_reject_threshold: 3      # Auto-reject articles scoring 3 or below
   relevance_model: "claude-haiku-4-5-20251001"
   default_days_back: 30
 

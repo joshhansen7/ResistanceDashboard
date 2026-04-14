@@ -111,44 +111,65 @@ def _model_available(base_url, model):
         if resp.status_code == 200:
             models = resp.json().get("models", [])
             model_base = model.split(":")[0]
-            return any(
-                m.get("name", "").startswith(model_base)
-                for m in models
-            )
+            for m in models:
+                name = m.get("name", "")
+                if name == model or name.startswith(model_base + ":") or name == model_base:
+                    return True
+            return False
     except Exception:
         pass
     return False
 
 
 def _call_ollama(prompt, system=None):
-    """Make a request to Ollama's generate API."""
+    """Make a request to Ollama's chat API with thinking disabled."""
     llm_cfg = _get_config()
     base_url = llm_cfg.get("base_url", "http://localhost:11434")
     model = llm_cfg.get("model", "qwen3:8b")
 
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
     payload = {
         "model": model,
-        "prompt": prompt,
+        "messages": messages,
         "stream": False,
+        "think": False,
         "options": {
             "temperature": 0.3,
-            "num_predict": 512,
+            "num_predict": 256,
         },
     }
-    if system:
-        payload["system"] = system
 
     try:
         resp = requests.post(
-            f"{base_url}/api/generate",
+            f"{base_url}/api/chat",
             json=payload,
             timeout=60,
         )
         resp.raise_for_status()
-        return resp.json().get("response", "")
+        return resp.json().get("message", {}).get("content", "")
     except Exception as e:
         logger.error("Ollama API error: %s", e)
         return None
+
+
+def _extract_json_object(text):
+    """Extract first balanced {...} JSON object from text using brace counting."""
+    start = text.find('{')
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i+1]
+    return None
 
 
 def _parse_json(text):
@@ -174,11 +195,11 @@ def _parse_json(text):
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # Try to extract JSON from the text
-        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-        if match:
+        # Try to extract JSON object from the text (brace-counted, handles nesting)
+        obj_text = _extract_json_object(text)
+        if obj_text:
             try:
-                return json.loads(match.group())
+                return json.loads(obj_text)
             except json.JSONDecodeError:
                 pass
         # Try array
@@ -217,20 +238,22 @@ Source: {source}
 Summary: {(summary or '')[:500]}"""
 
     response = _call_ollama(prompt)
+    if response is None:
+        return None, "Ollama unavailable"
+
     result = _parse_json(response)
     if result and "score" in result:
-        score = max(1, min(10, int(result["score"])))
+        score = max(1, min(10, int(float(result["score"]))))
         return score, result.get("reason", "")
 
     # Fallback: try to extract score from text
-    if response:
-        import re
-        match = re.search(r'"?score"?\s*[:=]\s*(\d+)', response)
-        if match:
-            return max(1, min(10, int(match.group(1)))), ""
+    import re
+    match = re.search(r'"?score"?\s*[:=]\s*(\d+)', response)
+    if match:
+        return max(1, min(10, int(match.group(1)))), ""
 
     logger.warning("Failed to parse relevance score from local LLM")
-    return 5, "Scoring error"
+    return None, "Scoring failed"
 
 
 def classify_topics(title, content, topic_list):

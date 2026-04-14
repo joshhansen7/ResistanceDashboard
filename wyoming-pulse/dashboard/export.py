@@ -6,7 +6,7 @@ Generates a self-contained HTML report for sharing with leadership.
 import json
 import tempfile
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import db
@@ -24,7 +24,7 @@ def generate_export_html(db_path):
     try:
         # Gather all data
         report_data = {
-            "generated": datetime.utcnow().isoformat(),
+            "generated": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "overview": _get_overview(conn),
             "wsi": _get_wsi(conn),
             "trend": _get_trend(conn),
@@ -40,8 +40,10 @@ def generate_export_html(db_path):
     template_path = Path(__file__).parent / "templates" / "export_template.html"
     template = template_path.read_text(encoding="utf-8")
 
-    html = template.replace("{{REPORT_DATA}}", json.dumps(report_data, indent=2))
-    html = html.replace("{{GENERATED_DATE}}", datetime.utcnow().strftime("%B %d, %Y"))
+    # Serialize and escape </ to prevent breaking out of the <script> tag
+    report_json = json.dumps(report_data, indent=2).replace("</", "<\\/")
+    html = template.replace("{{REPORT_DATA}}", report_json)
+    html = html.replace("{{GENERATED_DATE}}", datetime.now(timezone.utc).replace(tzinfo=None).strftime("%B %d, %Y"))
 
     # Write to temp file
     out = tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w", encoding="utf-8")

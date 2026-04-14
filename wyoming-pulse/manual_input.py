@@ -7,7 +7,7 @@ Also supports bulk CSV import.
 import csv
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import db
@@ -24,6 +24,16 @@ def prompt_input(prompt_text, default=None):
 
     value = input(display).strip()
     return value if value else default
+
+
+def prompt_url_required(prompt_text="URL (required)"):
+    """Prompt for a URL, re-prompting until a valid http(s) URL is given. Returns None if user gives up (empty after retry)."""
+    for _ in range(3):
+        value = input(f"{prompt_text}: ").strip()
+        if value and (value.startswith("http://") or value.startswith("https://")):
+            return value
+        print("  URL is required and must start with http:// or https://")
+    return None
 
 
 def prompt_multiline(prompt_text):
@@ -47,8 +57,11 @@ def add_news_article(conn):
         print("Title is required. Aborting.")
         return
 
-    url = prompt_input("URL (optional)")
-    date = prompt_input("Date (YYYY-MM-DD)", datetime.utcnow().strftime("%Y-%m-%d"))
+    url = prompt_url_required("URL (required)")
+    if not url:
+        print("Valid URL is required. Aborting.")
+        return
+    date = prompt_input("Date (YYYY-MM-DD)", datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d"))
     text = prompt_multiline("Brief summary or paste article text")
 
     article_data = {
@@ -87,8 +100,11 @@ def add_social_media(conn):
         print("Title is required. Aborting.")
         return
 
-    url = prompt_input("URL (optional)")
-    date = prompt_input("Date (YYYY-MM-DD)", datetime.utcnow().strftime("%Y-%m-%d"))
+    url = prompt_url_required("URL (required)")
+    if not url:
+        print("Valid URL is required. Aborting.")
+        return
+    date = prompt_input("Date (YYYY-MM-DD)", datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d"))
     text = prompt_multiline("Post/comment text")
 
     article_data = {
@@ -119,8 +135,11 @@ def add_legislative(conn):
         print("Title is required. Aborting.")
         return
 
-    url = prompt_input("URL (optional)")
-    date = prompt_input("Date (YYYY-MM-DD)", datetime.utcnow().strftime("%Y-%m-%d"))
+    url = prompt_url_required("URL (required)")
+    if not url:
+        print("Valid URL is required. Aborting.")
+        return
+    date = prompt_input("Date (YYYY-MM-DD)", datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d"))
     text = prompt_multiline("Description or key provisions")
 
     article_data = {
@@ -178,11 +197,16 @@ def bulk_csv_import(conn):
                     skipped += 1
                     continue
 
+                row_url = row.get("url", "").strip()
+                if not row_url:
+                    skipped += 1
+                    continue
+
                 article_data = {
                     "source": row.get("source", "CSV Import").strip(),
                     "source_type": row.get("source_type", "news").strip(),
                     "title": title,
-                    "url": row.get("url", "").strip() or None,
+                    "url": row_url,
                     "published_date": row.get("date", "").strip() or None,
                     "full_text": row.get("text", "").strip(),
                     "summary": (row.get("text", "").strip() or "")[:500],

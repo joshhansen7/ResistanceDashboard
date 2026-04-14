@@ -5,6 +5,7 @@ Serves the web dashboard for sentiment visualization.
 
 import os
 import sys
+import time
 from pathlib import Path
 
 from flask import Flask, render_template
@@ -29,7 +30,7 @@ def create_app():
 
     @app.route("/")
     def index():
-        return render_template("index.html")
+        return render_template("index.html", cache_bust=int(time.time()))
 
     return app
 

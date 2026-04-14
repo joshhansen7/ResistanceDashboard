@@ -86,6 +86,7 @@ async function initStateDropdowns() {
         populateStateDropdown('sentStateFilter'),
         populateStateDropdown('filterState', true, true),
         populateStateDropdown('ctrlSearchState'),
+        populateStateDropdown('ctrlSweepState'),
     ]);
 }
 
@@ -183,12 +184,19 @@ function escapeHtml(str) {
     return d.innerHTML;
 }
 
+function safeHttpUrl(url) {
+    if (!url) return '';
+    const trimmed = String(url).trim();
+    if (!/^https?:\/\//i.test(trimmed)) return '';
+    return escapeHtml(trimmed);
+}
+
 function articleUrl(url, table) {
     if (!url) return '#';
     if (url.includes('news.google.com')) {
         return `/api/resolve-url?url=${encodeURIComponent(url)}&table=${table || 'articles'}`;
     }
-    return escapeHtml(url);
+    return safeHttpUrl(url) || '#';
 }
 
 async function fetchJSON(url) {
@@ -284,11 +292,25 @@ function stateNameToKey(name) {
 }
 
 // ── Tooltip positioning helper ──
-function positionTooltip(event, container) {
+// Track timeout so we can cancel stale "No articles" hides
+let _tooltipHideTimer = null;
+
+function positionTooltip(event) {
     const tooltip = document.getElementById('mapTooltip');
-    const rect = container.getBoundingClientRect();
-    tooltip.style.left = (event.clientX - rect.left + 10) + 'px';
-    tooltip.style.top = (event.clientY - rect.top - 10) + 'px';
+    // Position relative to the tooltip's offset parent (.map-panel),
+    // NOT the wyomingMap container, to account for the map header.
+    const parent = tooltip.offsetParent || tooltip.parentElement;
+    const rect = parent.getBoundingClientRect();
+    let left = event.clientX - rect.left + 10;
+    let top = event.clientY - rect.top - 10;
+    // Bounds-check: keep tooltip inside the panel
+    const tw = tooltip.offsetWidth;
+    const th = tooltip.offsetHeight;
+    if (left + tw > rect.width - 4) left = event.clientX - rect.left - tw - 10;
+    if (top + th > rect.height - 4) top = event.clientY - rect.top - th - 10;
+    if (top < 0) top = 4;
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = top + 'px';
 }
 
 // ── Ensure TopoJSON is loaded (cached) ──
@@ -317,7 +339,9 @@ async function renderUSMap(stateSentiment) {
         const svg = d3.select(container)
             .append('svg')
             .attr('viewBox', `0 0 ${width} ${height}`)
-            .attr('preserveAspectRatio', 'xMidYMid meet');
+            .attr('preserveAspectRatio', 'xMidYMid meet')
+            .attr('role', 'img')
+            .attr('aria-label', 'United States sentiment map. Click a state to drill down.');
 
         svg.selectAll('.state-path')
             .data(states.features)
@@ -343,6 +367,7 @@ async function renderUSMap(stateSentiment) {
             })
             .attr('cursor', 'pointer')
             .on('mouseenter', function(event, d) {
+                if (_tooltipHideTimer) { clearTimeout(_tooltipHideTimer); _tooltipHideTimer = null; }
                 const tooltip = document.getElementById('mapTooltip');
                 const key = stateNameToKey(d.properties.name);
                 if (key && stateSentiment[key] && stateSentiment[key].avg !== null) {
@@ -351,9 +376,10 @@ async function renderUSMap(stateSentiment) {
                 } else {
                     tooltip.textContent = d.properties.name;
                 }
+                positionTooltip(event);
                 tooltip.classList.add('visible');
             })
-            .on('mousemove', function(event) { positionTooltip(event, container); })
+            .on('mousemove', function(event) { positionTooltip(event); })
             .on('mouseleave', function() {
                 document.getElementById('mapTooltip').classList.remove('visible');
             })
@@ -365,12 +391,14 @@ async function renderUSMap(stateSentiment) {
                     // Generic drill-down for any state with data
                     if (!_stateFipsCache) _stateFipsCache = await fetchJSON('/api/state-fips');
                     const fips = _stateFipsCache[key];
-                    if (fips) drillIntoGenericState(key, d.properties.name, fips);
+                    if (fips) drillIntoState(key, d.properties.name, fips);
                 } else {
                     const tooltip = document.getElementById('mapTooltip');
                     tooltip.textContent = `${d.properties.name} — No data yet`;
+                    positionTooltip(event);
                     tooltip.classList.add('visible');
-                    setTimeout(() => tooltip.classList.remove('visible'), 1500);
+                    if (_tooltipHideTimer) clearTimeout(_tooltipHideTimer);
+                    _tooltipHideTimer = setTimeout(() => { tooltip.classList.remove('visible'); _tooltipHideTimer = null; }, 1500);
                 }
             });
 
@@ -396,11 +424,14 @@ async function renderUSMap(stateSentiment) {
 }
 
 // ── State drill-down (county view) ──
-async function drillIntoState(stateKey) {
+async function drillIntoState(stateKey, stateNameArg, fipsArg) {
     const config = STATE_CONFIG[stateKey];
-    if (!config) return;
-
+    const stateName = config ? config.name : stateNameArg;
+    const fips = config ? config.fips : fipsArg;
+    if (!fips) return;
     const container = document.getElementById('wyomingMap');
+    document.getElementById('mapTooltip').classList.remove('visible');
+    if (_tooltipHideTimer) { clearTimeout(_tooltipHideTimer); _tooltipHideTimer = null; }
     container.innerHTML = '';
 
     try {
@@ -410,11 +441,11 @@ async function drillIntoState(stateKey) {
 
         const stateCounties = {
             type: 'FeatureCollection',
-            features: counties.features.filter(f => String(f.id).startsWith(config.fips))
+            features: counties.features.filter(f => String(f.id).startsWith(fips))
         };
         const stateOutline = {
             type: 'FeatureCollection',
-            features: statesGeo.features.filter(f => String(f.id) === config.fips)
+            features: statesGeo.features.filter(f => String(f.id) === fips)
         };
 
         const width = container.clientWidth;
@@ -425,10 +456,12 @@ async function drillIntoState(stateKey) {
         const svg = d3.select(container)
             .append('svg')
             .attr('viewBox', `0 0 ${width} ${height}`)
-            .attr('preserveAspectRatio', 'xMidYMid meet');
+            .attr('preserveAspectRatio', 'xMidYMid meet')
+            .attr('role', 'img')
+            .attr('aria-label', `${stateName} county sentiment map`);
 
         // Neighboring state outlines (rendered first, behind counties)
-        const neighborStates = statesGeo.features.filter(f => String(f.id) !== config.fips);
+        const neighborStates = statesGeo.features.filter(f => String(f.id) !== fips);
         svg.selectAll('.neighbor-state')
             .data(neighborStates)
             .enter()
@@ -448,7 +481,7 @@ async function drillIntoState(stateKey) {
             if (data.fips) fipsToCounty[data.fips] = name;
         });
         // Also include hardcoded cityCountyFips for marker rendering
-        const cityFips = config.cityCountyFips;
+        const cityFips = config ? config.cityCountyFips : undefined;
 
         // Draw counties
         svg.selectAll('.county-path')
@@ -459,6 +492,7 @@ async function drillIntoState(stateKey) {
             .attr('d', path)
             .attr('data-fips', d => d.id)
             .on('mouseenter', function(event, d) {
+                if (_tooltipHideTimer) { clearTimeout(_tooltipHideTimer); _tooltipHideTimer = null; }
                 const fips = String(d.id);
                 const countyName = (d.properties && d.properties.name) ? d.properties.name : `FIPS ${fips}`;
                 const tooltip = document.getElementById('mapTooltip');
@@ -468,9 +502,10 @@ async function drillIntoState(stateKey) {
                 } else {
                     tooltip.textContent = `${countyName} Co.`;
                 }
+                positionTooltip(event);
                 tooltip.classList.add('visible');
             })
-            .on('mousemove', function(event) { positionTooltip(event, container); })
+            .on('mousemove', function(event) { positionTooltip(event); })
             .on('mouseleave', function() {
                 document.getElementById('mapTooltip').classList.remove('visible');
             })
@@ -480,12 +515,14 @@ async function drillIntoState(stateKey) {
                 const countyDisplayName = (d.properties && d.properties.name)
                     ? d.properties.name + ' Co.' : county || `FIPS ${cfips}`;
                 if (county && locations[county] && locations[county].avg !== null) {
-                    drillIntoCounty(stateKey, config.name, config.fips, cfips, countyDisplayName);
+                    drillIntoCounty(stateKey, stateName, fips, cfips, countyDisplayName);
                 } else {
                     const tooltip = document.getElementById('mapTooltip');
                     tooltip.textContent = `${countyDisplayName} — No articles`;
+                    positionTooltip(event);
                     tooltip.classList.add('visible');
-                    setTimeout(() => tooltip.classList.remove('visible'), 1500);
+                    if (_tooltipHideTimer) clearTimeout(_tooltipHideTimer);
+                    _tooltipHideTimer = setTimeout(() => { tooltip.classList.remove('visible'); _tooltipHideTimer = null; }, 1500);
                 }
             });
 
@@ -512,7 +549,8 @@ async function drillIntoState(stateKey) {
                 .attr('stroke-opacity', 0.3);
         }
 
-        // City markers
+        // City markers (only for states with hardcoded config)
+        if (config && config.cities) {
         const labelOffsets = config.labelOffsets || {};
         Object.entries(config.cities).forEach(([city, coords]) => {
             const projected = projection(coords);
@@ -531,136 +569,6 @@ async function drillIntoState(stateKey) {
                     .text(city.replace(/_/g, ' ').toUpperCase());
             }
         });
-
-        mapView = 'county';
-        mapActiveState = stateKey;
-        mapActiveCounty = null;
-        mapNavStack = [{ view: 'us' }];
-        document.getElementById('mapTitle').textContent = config.name;
-        document.getElementById('mapBackBtn').style.display = '';
-
-        // Sync the dashboard state dropdown
-        const dashFilter = document.getElementById('dashStateFilter');
-        if (dashFilter && dashFilter.value !== stateKey) dashFilter.value = stateKey;
-
-        // Update key metrics and articles panel for this state
-        updateMetrics(`?state=${stateKey}`);
-        updateArticlesPanel({ state: stateKey, title: config.name });
-
-    } catch (err) {
-        console.error('State map render error:', err);
-        container.innerHTML = '<div class="no-data">Map unavailable</div>';
-    }
-}
-
-// ── Generic state drill-down (for states without hardcoded config) ──
-async function drillIntoGenericState(stateKey, stateName, fips) {
-    const container = document.getElementById('wyomingMap');
-    container.innerHTML = '';
-
-    try {
-        const us = await ensureTopoData();
-        const counties = topojson.feature(us, us.objects.counties);
-        const statesGeo = topojson.feature(us, us.objects.states);
-
-        const stateCounties = {
-            type: 'FeatureCollection',
-            features: counties.features.filter(f => String(f.id).startsWith(fips))
-        };
-        const stateOutline = {
-            type: 'FeatureCollection',
-            features: statesGeo.features.filter(f => String(f.id) === fips)
-        };
-
-        const width = container.clientWidth;
-        const height = container.clientHeight || 330;
-        const projection = d3.geoAlbersUsa().fitSize([width, height], stateOutline);
-        const path = d3.geoPath().projection(projection);
-
-        const svg = d3.select(container)
-            .append('svg')
-            .attr('viewBox', `0 0 ${width} ${height}`)
-            .attr('preserveAspectRatio', 'xMidYMid meet');
-
-        // Neighboring states
-        const neighborStates = statesGeo.features.filter(f => String(f.id) !== fips);
-        svg.selectAll('.neighbor-state')
-            .data(neighborStates)
-            .enter()
-            .append('path')
-            .attr('class', 'neighbor-state')
-            .attr('d', path)
-            .attr('fill', '#0a0e17')
-            .attr('stroke', 'rgba(148,163,184,0.15)')
-            .attr('stroke-width', 0.5);
-
-        // Fetch county-level sentiment
-        const locations = await fetchJSON(`/api/locations?state=${stateKey}`);
-        const fipsToCounty = {};
-        Object.entries(locations).forEach(([name, data]) => {
-            if (data.fips) fipsToCounty[data.fips] = name;
-        });
-
-        // Draw counties
-        svg.selectAll('.county-path')
-            .data(stateCounties.features)
-            .enter()
-            .append('path')
-            .attr('class', 'county-path')
-            .attr('d', path)
-            .attr('data-fips', d => d.id)
-            .on('mouseenter', function(event, d) {
-                const cfips = String(d.id);
-                const countyName = (d.properties && d.properties.name) ? d.properties.name : `FIPS ${cfips}`;
-                const tooltip = document.getElementById('mapTooltip');
-                const county = fipsToCounty[cfips];
-                if (county && locations[county] && locations[county].avg !== null) {
-                    tooltip.textContent = `${countyName} Co. | avg: ${locations[county].avg.toFixed(1)} | n=${locations[county].count}`;
-                } else {
-                    tooltip.textContent = `${countyName} Co.`;
-                }
-                tooltip.classList.add('visible');
-            })
-            .on('mousemove', function(event) { positionTooltip(event, container); })
-            .on('mouseleave', function() {
-                document.getElementById('mapTooltip').classList.remove('visible');
-            })
-            .on('click', function(event, d) {
-                const cfips = String(d.id);
-                const county = fipsToCounty[cfips];
-                const countyDisplayName = (d.properties && d.properties.name)
-                    ? d.properties.name + ' Co.' : county || `FIPS ${cfips}`;
-                if (county && locations[county] && locations[county].avg !== null) {
-                    drillIntoCounty(stateKey, stateName, fips, cfips, countyDisplayName);
-                } else {
-                    const tooltip = document.getElementById('mapTooltip');
-                    tooltip.textContent = `${countyDisplayName} — No articles`;
-                    tooltip.classList.add('visible');
-                    setTimeout(() => tooltip.classList.remove('visible'), 1500);
-                }
-            });
-
-        // Color counties
-        Object.entries(locations).forEach(([name, data]) => {
-            if (data.fips && data.avg !== null) {
-                const el = document.querySelector(`.county-path[data-fips="${data.fips}"]`);
-                if (el) {
-                    el.style.fill = sentimentColor(data.avg);
-                    el.style.stroke = '#14b8a6';
-                    el.style.strokeWidth = '0.8';
-                }
-            }
-        });
-
-        // State outline
-        if (stateOutline.features[0]) {
-            svg.append('path')
-                .datum(stateOutline.features[0])
-                .attr('d', path)
-                .attr('fill', 'none')
-                .attr('stroke', '#14b8a6')
-                .attr('stroke-width', 1)
-                .attr('stroke-opacity', 0.3);
         }
 
         mapView = 'county';
@@ -674,11 +582,12 @@ async function drillIntoGenericState(stateKey, stateName, fips) {
         const dashFilter = document.getElementById('dashStateFilter');
         if (dashFilter && dashFilter.value !== stateKey) dashFilter.value = stateKey;
 
+        // Update key metrics and articles panel for this state
         updateMetrics(`?state=${stateKey}`);
         updateArticlesPanel({ state: stateKey, title: stateName });
 
     } catch (err) {
-        console.error('Generic state map render error:', err);
+        console.error('State map render error:', err);
         container.innerHTML = '<div class="no-data">Map unavailable</div>';
     }
 }
@@ -687,6 +596,7 @@ async function drillIntoGenericState(stateKey, stateName, fips) {
 async function drillIntoCounty(stateKey, stateName, stateFips, countyFips, countyName) {
     const container = document.getElementById('wyomingMap');
     document.getElementById('mapTooltip').classList.remove('visible');
+    if (_tooltipHideTimer) { clearTimeout(_tooltipHideTimer); _tooltipHideTimer = null; }
     container.innerHTML = '';
 
     try {
@@ -789,6 +699,8 @@ async function drillIntoCounty(stateKey, stateName, stateFips, countyFips, count
 
 // ── Back navigation (handles 3 levels: county → state → US) ──
 async function showUSMap() {
+    document.getElementById('mapTooltip').classList.remove('visible');
+    if (_tooltipHideTimer) { clearTimeout(_tooltipHideTimer); _tooltipHideTimer = null; }
     if (mapView === 'single-county' && mapActiveState) {
         // Go back to state view (not all the way to US)
         if (STATE_CONFIG[mapActiveState]) {
@@ -796,7 +708,7 @@ async function showUSMap() {
         } else {
             if (!_stateFipsCache) _stateFipsCache = await fetchJSON('/api/state-fips');
             const fips = _stateFipsCache[mapActiveState];
-            if (fips) drillIntoGenericState(mapActiveState, getStateName(mapActiveState), fips);
+            if (fips) drillIntoState(mapActiveState, getStateName(mapActiveState), fips);
         }
         return;
     }
@@ -826,7 +738,7 @@ async function updateArticlesPanel(scope) {
     // Build query string
     let qs = 'limit=5';
     if (scope.county_fips) qs += `&county_fips=${scope.county_fips}`;
-    else if (scope.state) qs += `&state=${scope.state}`;
+    else if (scope.state) qs += `&state=${scope.state}&relevance=primary`;
 
     titleEl.textContent = scope.title || 'Recent Articles';
 
@@ -847,17 +759,23 @@ async function updateArticlesPanel(scope) {
             const ago = timeAgo(a.published_date);
 
             let expandedHtml = '';
-            if (a.key_claims) expandedHtml += `<div class="card-claims"><strong>Key Claims: </strong>${a.key_claims}</div>`;
-            if (a.sentiment_justification) expandedHtml += `<div class="card-rationale"><strong>Rationale: </strong>${a.sentiment_justification}</div>`;
-            if (a.url) expandedHtml += `<a href="${a.url}" target="_blank" rel="noopener" class="card-link">Read full article &rarr;</a>`;
+            if (a.key_claims) expandedHtml += `<div class="card-claims"><strong>Key Claims: </strong>${escapeHtml(a.key_claims)}</div>`;
+            if (a.sentiment_justification) expandedHtml += `<div class="card-rationale"><strong>Rationale: </strong>${escapeHtml(a.sentiment_justification)}</div>`;
+            if (a.url) {
+                const safeUrl = safeHttpUrl(a.url);
+                if (safeUrl) expandedHtml += `<a href="${safeUrl}" target="_blank" rel="noopener" class="card-link">Read full article &rarr;</a>`;
+            }
 
-            return `<div class="article-card" onclick="toggleArticleCard(this)">
+            const relTag = a.state_relevance === 'mentioned'
+                ? '<span class="pill pill-relevance pill-mentioned">Mentioned</span> '
+                : (a.state_relevance === 'primary' ? '<span class="pill pill-relevance pill-primary">Primary</span> ' : '');
+            return `<div class="article-card" onclick="toggleArticleCard(this)" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleArticleCard(this)}">
                 <div class="card-header">
                     <span class="card-score" style="background:${scoreColor}">${scoreText}</span>
-                    <span class="card-title">${title}</span>
+                    <span class="card-title">${escapeHtml(title)}</span>
                 </div>
-                <div class="card-meta">${source} &middot; ${ago}</div>
-                ${summary ? `<div class="card-summary">${summary}</div>` : ''}
+                <div class="card-meta">${relTag}${escapeHtml(source)} &middot; ${ago}</div>
+                ${summary ? `<div class="card-summary">${escapeHtml(summary)}</div>` : ''}
                 <div class="card-expanded">${expandedHtml}</div>
             </div>`;
         }).join('');
@@ -897,25 +815,29 @@ function viewAllArticles() {
 //  PAGE 1: DASHBOARD
 // ══════════════════════════════════════════════
 async function onDashStateChange() {
-    const stateKey = (document.getElementById('dashStateFilter') || {}).value || '';
+    const dropdown = document.getElementById('dashStateFilter');
+    const stateKey = (dropdown || {}).value || '';
     if (!stateKey) {
-        // "All States" selected — go back to US map
         mapView = 'none';
         renderDashboard();
         return;
     }
-    // Drill into the selected state
-    if (STATE_CONFIG[stateKey]) {
-        drillIntoState(stateKey);
-    } else {
-        if (!_stateFipsCache) _stateFipsCache = await fetchJSON('/api/state-fips');
-        const fips = _stateFipsCache[stateKey];
-        if (fips) {
-            drillIntoGenericState(stateKey, getStateName(stateKey), fips);
+    // Disable dropdown during async render to prevent race conditions
+    if (dropdown) dropdown.disabled = true;
+    try {
+        if (STATE_CONFIG[stateKey]) {
+            await drillIntoState(stateKey);
         } else {
-            // State has no FIPS (shouldn't happen) — just update metrics
-            renderDashboard();
+            if (!_stateFipsCache) _stateFipsCache = await fetchJSON('/api/state-fips');
+            const fips = _stateFipsCache[stateKey];
+            if (fips) {
+                await drillIntoState(stateKey, getStateName(stateKey), fips);
+            } else {
+                renderDashboard();
+            }
         }
+    } finally {
+        if (dropdown) dropdown.disabled = false;
     }
 }
 
@@ -1012,21 +934,8 @@ async function renderDashboard() {
     } catch (err) { console.error('Dashboard error:', err); }
 }
 
-function renderWSITrendChart(trend) {
-    const canvas = document.getElementById('trendChart');
-    const noData = document.getElementById('trendNoData');
-    destroyChart('trend');
-
-    const realData = trend ? trend.filter(t => t.wsi !== null) : [];
-    if (realData.length === 0) {
-        canvas.style.display = 'none';
-        noData.style.display = 'block';
-        return;
-    }
-    canvas.style.display = 'block';
-    noData.style.display = 'none';
-
-    charts.trend = new Chart(canvas, {
+function buildWSIChartConfig({ trend, pointRadius, pointHoverRadius, borderWidth, maxTicksLimit }) {
+    return {
         type: 'line',
         data: {
             labels: trend.map(d => fmtDate(d.week)),
@@ -1038,12 +947,12 @@ function renderWSITrendChart(trend) {
                     backgroundColor: 'transparent',
                     fill: false,
                     tension: 0.2,
-                    pointRadius: trend.length === 1 ? 4 : 2,
-                    pointHoverRadius: 5,
+                    pointRadius: pointRadius,
+                    pointHoverRadius: pointHoverRadius,
                     pointBackgroundColor: '#14b8a6',
                     pointBorderColor: '#050810',
                     pointBorderWidth: 1,
-                    borderWidth: 2,
+                    borderWidth: borderWidth,
                     segment: {
                         borderDash: ctx => trend[ctx.p1DataIndex]?.carried ? [4, 3] : [],
                     },
@@ -1082,10 +991,33 @@ function renderWSITrendChart(trend) {
                      ticks: { stepSize: 1, font: { family: "'JetBrains Mono', monospace", size: 9 },
                               callback: v => ({ 1:'V.NEG', 2:'NEG', 3:'NEU', 4:'POS', 5:'V.POS' }[v] || v) } },
                 x: { grid: { color: 'rgba(26,31,46,0.3)' },
-                     ticks: { maxTicksLimit: 12, font: { family: "'JetBrains Mono', monospace", size: 9 } } }
+                     ticks: { maxTicksLimit: maxTicksLimit, font: { family: "'JetBrains Mono', monospace", size: 9 } } }
             }
         }
-    });
+    };
+}
+
+function renderWSITrendChart(trend) {
+    const canvas = document.getElementById('trendChart');
+    const noData = document.getElementById('trendNoData');
+    destroyChart('trend');
+
+    const realData = trend ? trend.filter(t => t.wsi !== null) : [];
+    if (realData.length === 0) {
+        canvas.style.display = 'none';
+        noData.style.display = 'block';
+        return;
+    }
+    canvas.style.display = 'block';
+    noData.style.display = 'none';
+
+    charts.trend = new Chart(canvas, buildWSIChartConfig({
+        trend,
+        pointRadius: trend.length === 1 ? 4 : 2,
+        pointHoverRadius: 5,
+        borderWidth: 2,
+        maxTicksLimit: 12,
+    }));
 }
 
 function renderPeriodComparison(pc) {
@@ -1180,62 +1112,13 @@ function renderSentimentWSIChart(trend) {
     canvas.style.display = 'block';
     noData.style.display = 'none';
 
-    charts.sentTrend = new Chart(canvas, {
-        type: 'line',
-        data: {
-            labels: trend.map(d => fmtDate(d.week)),
-            datasets: [
-                {
-                    label: 'WSI',
-                    data: trend.map(d => d.wsi),
-                    borderColor: '#14b8a6',
-                    backgroundColor: 'transparent',
-                    fill: false,
-                    tension: 0.2,
-                    pointRadius: 3,
-                    pointHoverRadius: 6,
-                    pointBackgroundColor: '#14b8a6',
-                    pointBorderColor: '#050810',
-                    pointBorderWidth: 1,
-                    borderWidth: 2.5,
-                    segment: { borderDash: ctx => trend[ctx.p1DataIndex]?.carried ? [4, 3] : [] },
-                },
-                {
-                    label: 'Raw Avg',
-                    data: trend.map(d => d.raw),
-                    borderColor: 'rgba(107,114,128,0.5)',
-                    backgroundColor: 'transparent',
-                    fill: false,
-                    tension: 0.2,
-                    pointRadius: 0,
-                    pointHoverRadius: 3,
-                    borderWidth: 1,
-                    borderDash: [2, 2],
-                    segment: { borderDash: ctx => trend[ctx.p1DataIndex]?.carried ? [1, 3] : [2, 2] },
-                }
-            ]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: true,
-            plugins: {
-                legend: { display: true, labels: { boxWidth: 12, padding: 10, font: { family: "'JetBrains Mono', monospace", size: 9 }, color: '#6b7280' } },
-                tooltip: { ...ttCfg, callbacks: {
-                    afterLabel: ctx => {
-                        const d = trend[ctx.dataIndex];
-                        return d ? `articles: ${d.articles} | clusters: ${d.clusters}${d.carried ? ' (carried)' : ''}` : '';
-                    }
-                } }
-            },
-            scales: {
-                y: { min: 1, max: 5, grid: { color: 'rgba(26,31,46,0.5)' },
-                     ticks: { stepSize: 1, font: { family: "'JetBrains Mono', monospace", size: 9 },
-                              callback: v => ({ 1:'V.NEG', 2:'NEG', 3:'NEU', 4:'POS', 5:'V.POS' }[v] || v) } },
-                x: { grid: { color: 'rgba(26,31,46,0.3)' },
-                     ticks: { maxTicksLimit: 14, font: { family: "'JetBrains Mono', monospace", size: 9 } } }
-            }
-        }
-    });
+    charts.sentTrend = new Chart(canvas, buildWSIChartConfig({
+        trend,
+        pointRadius: 3,
+        pointHoverRadius: 6,
+        borderWidth: 2.5,
+        maxTicksLimit: 14,
+    }));
 }
 
 async function renderPeriodCards() {
@@ -1254,7 +1137,8 @@ async function renderPeriodCards() {
             const wsi = r.current_wsi;
             const arrow = pc?.direction === 'improving' ? '\u25B2' : pc?.direction === 'declining' ? '\u25BC' : '\u25C6';
             const changeColor = pc?.direction === 'improving' ? 'var(--sent-5)' : pc?.direction === 'declining' ? 'var(--sent-1)' : 'var(--sent-3)';
-            return `<div class="period-card" style="border-left: 3px solid ${sentimentColor(wsi)}">
+            const isAll = i === 0;
+            return `<div class="period-card${isAll ? ' period-card-all' : ''}" style="border-left: 3px solid ${sentimentColor(wsi)}">
                 <div class="period-card-label">${labels[i]}</div>
                 <div class="period-card-wsi" style="color:${sentimentColor(wsi)}">${wsi !== null ? wsi.toFixed(2) : '--'}</div>
                 <div class="period-card-change" style="color:${changeColor}">${pc?.change !== null ? `${arrow} ${pc.change > 0 ? '+' : ''}${pc.change.toFixed(2)}` : '--'}</div>
@@ -1287,6 +1171,8 @@ function renderLocationHeatmap(locWeekly) {
         trackedStates.forEach(s => _hmExpandedStates.add(s));
     }
 
+    el.setAttribute('role', 'grid');
+    el.setAttribute('aria-label', 'Location sentiment heatmap');
     el.style.gridTemplateColumns = `140px repeat(${weeks.length}, 34px)`;
 
     let html = '<div class="hm-label"></div>';
@@ -1613,13 +1499,16 @@ async function renderArticles(append = false) {
             const titleTrunc = a.title && a.title.length > 70 ? a.title.substring(0, 67) + '...' : (a.title || '--');
             const topics = (a.topic_tags || []).map(t => `<span class="pill pill-topic">${topicDisplay(t)}</span>`).join(' ');
             const entities = (a.entities_mentioned || []).map(e => `<span class="pill pill-entity">${escapeHtml(e)}</span>`).join(' ');
+            const relBadge = a.state_relevance === 'mentioned'
+                ? ' <span class="pill pill-relevance pill-mentioned">Mentioned</span>'
+                : (a.state_relevance === 'primary' ? ' <span class="pill pill-relevance pill-primary">Primary</span>' : '');
             return `
-                <tr style="cursor:pointer" onclick="toggleExpand(${idx})">
+                <tr style="cursor:pointer" onclick="toggleExpand(${idx})" tabindex="0" role="row" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleExpand(${idx})}">
                     <td class="text-cell"><span onclick="event.stopPropagation();showArticleDetail(${a.id})" style="cursor:pointer;color:var(--accent)">${escapeHtml(titleTrunc)}</span></td>
                     <td>${escapeHtml(a.source || '')}</td>
                     <td>${fmtDate(a.published_date)}</td>
                     <td><span class="pill ${sentimentPillClass(a.sentiment_label)}">${sentimentLabel(a.sentiment_label)}</span></td>
-                    <td><span class="pill pill-state">${getStateAbbr(a.state)}</span></td>
+                    <td><span class="pill pill-state">${getStateAbbr(a.state)}</span>${relBadge}</td>
                     <td><span class="pill pill-loc">${a.location_relevance === 'statewide' ? 'General' : capitalize(a.location_relevance || '')}</span></td>
                 </tr>
                 <tr class="expand-row hidden" id="expand-${idx}">
@@ -2412,6 +2301,103 @@ function pollWebSearch(taskId) {
     }, 2000);
 }
 
+async function runStateSweep() {
+    const btn = document.getElementById('btnSweep');
+    const status = document.getElementById('statusSweep');
+    const daysBack = document.getElementById('ctrlSweepDays').value;
+    const state = (document.getElementById('ctrlSweepState') || {}).value || '';
+    const skipAnalysis = !(document.getElementById('ctrlSweepAnalyze') || {}).checked;
+    const startDate = (document.getElementById('ctrlSweepStart') || {}).value || '';
+    const endDate = (document.getElementById('ctrlSweepEnd') || {}).value || '';
+
+    btn.disabled = true;
+    btn.classList.add('running');
+    status.innerHTML = '<span class="task-running">Starting sweep...</span>';
+
+    try {
+        const body = {
+            days_back: parseInt(daysBack),
+            state: state || null,
+            skip_analysis: skipAnalysis,
+        };
+        if (startDate) body.start_date = startDate;
+        if (endDate) body.end_date = endDate;
+
+        const resp = await fetch('/api/control/run-sweep', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+
+        if (data.task_id) {
+            pollStateSweep(data.task_id);
+        } else {
+            status.innerHTML = '<span class="task-error">Failed to start sweep</span>';
+            btn.disabled = false;
+            btn.classList.remove('running');
+        }
+    } catch (err) {
+        status.innerHTML = `<span class="task-error">Error: ${escapeHtml(err.message)}</span>`;
+        btn.disabled = false;
+        btn.classList.remove('running');
+    }
+}
+
+function pollStateSweep(taskId) {
+    const btn = document.getElementById('btnSweep');
+    const status = document.getElementById('statusSweep');
+    let elapsed = 0;
+
+    if (_pollTimers.sweep) clearInterval(_pollTimers.sweep);
+
+    _pollTimers.sweep = setInterval(async () => {
+        elapsed += 3;
+        try {
+            const data = await fetchJSON(`/api/control/task/${taskId}`);
+
+            if (data.status === 'running') {
+                const mins = Math.floor(elapsed / 60);
+                const secs = elapsed % 60;
+                const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+                status.innerHTML = `<span class="task-running">Sweeping states... (${timeStr})</span>`;
+            } else if (data.status === 'completed') {
+                clearInterval(_pollTimers.sweep);
+                _pollTimers.sweep = null;
+                btn.disabled = false;
+                btn.classList.remove('running');
+
+                const r = data.result || {};
+                let msg = `${r.states_searched || 50} states`;
+                msg += ` | ${r.total_results || 0} results`;
+                msg += ` | ${r.new_articles || 0} new`;
+                if (r.auto_approved > 0) msg += ` | ${r.auto_approved} auto-approved`;
+                if (r.analyzed > 0) msg += ` | ${r.analyzed} analyzed`;
+                const dupes = (r.skipped_url || 0) + (r.skipped_title || 0);
+                if (dupes > 0) msg += ` | ${dupes} dupes`;
+                if (r.api_key_set === false && r.new_articles > 0) {
+                    msg += `</span><br><span class="task-warning">API key not set — relevance scoring skipped`;
+                }
+                status.innerHTML = `<span class="task-complete">${msg}</span>`;
+                renderReviewQueue();
+                renderControl();
+            } else if (data.status === 'error') {
+                clearInterval(_pollTimers.sweep);
+                _pollTimers.sweep = null;
+                status.innerHTML = `<span class="task-error">Error: ${escapeHtml(data.error || 'Unknown')}</span>`;
+                btn.disabled = false;
+                btn.classList.remove('running');
+            }
+        } catch (err) {
+            clearInterval(_pollTimers.sweep);
+            _pollTimers.sweep = null;
+            status.innerHTML = `<span class="task-error">Poll error: ${escapeHtml(err.message)}</span>`;
+            btn.disabled = false;
+            btn.classList.remove('running');
+        }
+    }, 3000);  // Poll every 3s (sweeps take longer)
+}
+
 function togglePendingExpand(id, event) {
     if (event.target.closest('input, a')) return;
     const row = document.getElementById(`pending-expand-${id}`);
@@ -2574,4 +2560,14 @@ async function renderConfigSection() {
 document.addEventListener('DOMContentLoaded', async () => {
     await Promise.all([initStateDropdowns(), _loadRegionOptions()]);
     renderDashboard();
+});
+
+// ── Keyboard Accessibility ──
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        const modal = document.getElementById('digestModal');
+        if (modal && modal.classList.contains('show')) {
+            modal.classList.remove('show');
+        }
+    }
 });

@@ -6,7 +6,7 @@ SQLite database for storing articles, sentiment analysis, and digest history.
 import json
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger("wyoming_pulse.db")
@@ -108,6 +108,8 @@ def get_connection(db_path=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -206,7 +208,7 @@ def insert_article(conn, article_data):
          state, location_relevance, content_quality)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     params = (
         article_data.get("source", "Unknown"),
         article_data.get("source_type", "news"),
@@ -277,7 +279,7 @@ def update_article_analysis(conn, article_id, analysis):
         locations_json = ?
     WHERE id = ?
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     params = (
         now,
         analysis.get("sentiment_score"),
@@ -369,7 +371,7 @@ def insert_digest(conn, digest_data):
         (filename, generated_date, period_start, period_end, article_count, avg_sentiment, content)
     VALUES (?, ?, ?, ?, ?, ?, ?)
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     params = (
         digest_data["filename"],
         now,
@@ -389,7 +391,7 @@ def insert_feed_run(conn, feed_name, articles_found, articles_matched, status="s
     INSERT INTO feed_runs (feed_name, run_date, articles_found, articles_matched, status)
     VALUES (?, ?, ?, ?, ?)
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     conn.execute(sql, (feed_name, now, articles_found, articles_matched, status))
     conn.commit()
 
@@ -480,7 +482,7 @@ def insert_pending_article(conn, article_data):
          source_type, state)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     params = (
         article_data["search_id"],
         article_data.get("source", "Web Search"),

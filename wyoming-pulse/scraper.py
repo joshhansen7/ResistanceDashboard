@@ -7,6 +7,7 @@ Falls back gracefully when content can't be retrieved.
 import base64
 import logging
 import re
+import sqlite3
 import time
 
 import db
@@ -150,12 +151,9 @@ def scrape_url(url, timeout=15):
     try:
         import trafilatura
 
-        # Resolve Google News redirects to actual article URL
-        resolved_url = resolve_google_news_url(url)
-
-        downloaded = trafilatura.fetch_url(resolved_url)
+        downloaded = trafilatura.fetch_url(url)
         if not downloaded:
-            logger.debug("No content downloaded from %s", resolved_url)
+            logger.debug("No content downloaded from %s", url)
             return None
 
         text = trafilatura.extract(
@@ -178,6 +176,58 @@ def scrape_url(url, timeout=15):
     except Exception as e:
         logger.debug("Scrape failed for %s: %s", url, e)
         return None
+
+
+def scrape_article_metadata(url):
+    """
+    Fetch a URL and extract article metadata + full text.
+    Returns a dict with title, full_text, published_date, source, or
+    a minimal dict with just source if scraping fails.
+    """
+    from urllib.parse import urlparse
+
+    # Derive source from domain
+    domain = urlparse(url).netloc.lower()
+    source = domain.removeprefix("www.")
+    # Title-case the domain for display (e.g. "reuters.com" -> "Reuters.Com")
+    source_display = source.split(".")[0].title() if source else "Unknown"
+
+    resolved_url = resolve_google_news_url(url)
+
+    try:
+        import json as _json
+        import trafilatura
+
+        downloaded = trafilatura.fetch_url(resolved_url)
+        if not downloaded:
+            return {"source": source_display, "url": resolved_url}
+
+        raw = trafilatura.extract(
+            downloaded,
+            include_comments=False,
+            include_tables=False,
+            with_metadata=True,
+            output_format="json",
+        )
+        if not raw:
+            return {"source": source_display, "url": resolved_url}
+
+        metadata = _json.loads(raw)
+        result = {
+            "title": metadata.get("title") or "",
+            "full_text": metadata.get("text") or "",
+            "published_date": metadata.get("date") or "",
+            "source": metadata.get("sitename") or metadata.get("hostname") or source_display,
+            "url": resolved_url,
+        }
+        return result
+
+    except ImportError:
+        logger.warning("trafilatura not installed — run: pip install trafilatura")
+        return {"source": source_display, "url": resolved_url}
+    except Exception as e:
+        logger.debug("Metadata scrape failed for %s: %s", url, e)
+        return {"source": source_display, "url": resolved_url}
 
 
 def scrape_thin_articles(conn, limit=None, progress_callback=None):
@@ -224,8 +274,11 @@ def scrape_thin_articles(conn, limit=None, progress_callback=None):
                 conn.execute("UPDATE articles SET url = ? WHERE id = ?", (resolved_url, row["id"]))
                 conn.commit()
                 logger.info("  -> Resolved URL: %s", resolved_url[:80])
-            except Exception:
+            except sqlite3.IntegrityError:
                 logger.warning("  -> URL already exists in DB, keeping original")
+                resolved_url = url
+            except Exception as e:
+                logger.error("  -> Failed to update resolved URL: %s", e)
                 resolved_url = url
 
         text = scrape_url(resolved_url)

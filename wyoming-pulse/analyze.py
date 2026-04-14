@@ -20,7 +20,7 @@ Analyze the following article and return a JSON object (no markdown fences, no p
   "sentiment_score": <float 1.0-5.0>,
   "sentiment_label": "<strongly_negative|slightly_negative|neutral|slightly_positive|strongly_positive>",
   "locations": [
-    {{"state": "<lowercase state name>", "place": "<city, township, or county if applicable>", "relevance": "<primary|mentioned>"}}
+    {{"state": "<lowercase state name>", "town": "<city or township if known>", "county": "<county name if known>", "relevance": "<primary|mentioned>"}}
   ],
   "topic_tags": ["<from: {topic_tags}>"],
   "entities_mentioned": ["<company or organization names>"],
@@ -31,14 +31,17 @@ Analyze the following article and return a JSON object (no markdown fences, no p
 {topic_descriptions}
 
 Geographic tagging rules for the "locations" array:
-- Each entry needs "state" (lowercase US state name), optional "place" (specific city/township/county), and "relevance" ("primary" or "mentioned")
+- Each entry needs "state" (lowercase US state name) and "relevance" ("primary" or "mentioned")
+- "town": optional — the specific city, township, village, or community name (e.g., "Saline Township", "Evanston", "Mount Pleasant")
+- "county": optional — the county name if identifiable from the article (e.g., "Washtenaw County", "Imperial County"). Include the word "County" in the name.
+- Provide both "town" and "county" when the article names both. If only one is identifiable, provide whichever is available.
 - "primary": the article is primarily about this place. "mentioned": the place is referenced but isn't the main focus
 - An article can have multiple primary locations (e.g., comparing developments in two cities)
-- An article about state-level policy should include a statewide entry with no "place" field
+- An article about state-level policy should include a statewide entry with no "town" or "county" fields
 - If the article discusses both statewide policy AND specific locations, include entries for both
 - If the article is about multiple states, include entries for each state
 - Use "nationwide" as state for federal/national scope with no single-state focus
-- Be specific with place names: prefer "Saline Township" over "Ann Arbor area" if the article names the township
+- Be specific: prefer "Saline Township" over "Ann Arbor area" if the article names the township
 - DISAMBIGUATION: When a place name exists in multiple states (e.g., Evanston in WY vs IL, Springfield in many states, Portland in OR vs ME), use context clues to determine the correct state: nearby cities mentioned, state agencies referenced, regional references, news source geography.
 
 Sentiment scale — rate the TONE and FRAMING of the article, not the subject matter:
@@ -92,12 +95,20 @@ def parse_analysis_response(response_text):
 
     # Handle location formats
     if "locations" in result and isinstance(result["locations"], list) and result["locations"]:
-        # New multi-location format
+        # Multi-location format (handles both old "place" and new "town"/"county" fields)
         locations = result["locations"]
         # Normalize state keys and reject non-US locations
         for loc in locations:
             if "state" in loc:
                 loc["state"] = normalize_state_key(loc["state"]) or loc["state"]
+            # Unify town/county/place fields:
+            # - New format uses "town" and "county" separately
+            # - Old format uses "place" for everything
+            # Set "place" from "town" for backward compat (DB article_states.place column)
+            if "town" in loc and not loc.get("place"):
+                loc["place"] = loc["town"]
+            elif "place" in loc and not loc.get("town"):
+                loc["town"] = loc["place"]
         # Filter to only valid US states
         valid_locations = [l for l in locations if normalize_state_key(l.get("state"))]
         locations = valid_locations if valid_locations else [{"state": "nationwide", "relevance": "primary", "place": "nationwide"}]
@@ -107,7 +118,7 @@ def parse_analysis_response(response_text):
         # Set backward-compat fields from first primary (or first) location
         primary = next((l for l in locations if l.get("relevance") == "primary"), locations[0])
         result["state"] = primary.get("state", "other")
-        place = primary.get("place")
+        place = primary.get("place") or primary.get("town")
         result["location_relevance"] = place if place else "statewide"
     elif "state" in result:
         # Old single-location format — wrap into locations array
@@ -195,75 +206,75 @@ def analyze_articles(config=None, limit=None, progress_callback=None):
     )
 
     conn = db.get_connection()
-    articles = db.get_unanalyzed_articles(conn, limit=limit)
+    try:
+        articles = db.get_unanalyzed_articles(conn, limit=limit)
 
-    if not articles:
-        logger.info("No unanalyzed articles found.")
-        conn.close()
-        return {"analyzed": 0, "skipped": 0, "errors": 0}
+        if not articles:
+            logger.info("No unanalyzed articles found.")
+            return {"analyzed": 0, "skipped": 0, "errors": 0}
 
-    logger.info("Found %d articles to analyze", len(articles))
-    analyzed_count = 0
-    error_count = 0
-    total_input_tokens = 0
-    total_output_tokens = 0
+        logger.info("Found %d articles to analyze", len(articles))
+        analyzed_count = 0
+        error_count = 0
+        total_input_tokens = 0
+        total_output_tokens = 0
 
-    total = len(articles)
-    for idx, article in enumerate(articles):
-        article_id = article["id"]
-        title = article["title"]
-        logger.info("Analyzing: %s", title[:60])
+        total = len(articles)
+        for idx, article in enumerate(articles):
+            article_id = article["id"]
+            title = article["title"]
+            logger.info("Analyzing: %s", title[:60])
 
-        user_msg = build_user_message(article)
+            user_msg = build_user_message(article)
 
-        for attempt in range(max_retries):
-            try:
-                response = client.messages.create(
-                    model=model,
-                    max_tokens=1024,
-                    timeout=timeout,
-                    system=system_prompt,
-                    messages=[{"role": "user", "content": user_msg}],
-                )
-
-                # Track token usage
-                usage = response.usage
-                total_input_tokens += usage.input_tokens
-                total_output_tokens += usage.output_tokens
-
-                response_text = response.content[0].text
-                analysis = parse_analysis_response(response_text)
-
-                if analysis:
-                    db.update_article_analysis(conn, article_id, analysis)
-                    analyzed_count += 1
-                    logger.info(
-                        "  -> %s (%.1f) [%s]",
-                        analysis["sentiment_label"],
-                        analysis["sentiment_score"],
-                        analysis["location_relevance"],
+            for attempt in range(max_retries):
+                try:
+                    response = client.messages.create(
+                        model=model,
+                        max_tokens=1024,
+                        timeout=timeout,
+                        system=system_prompt,
+                        messages=[{"role": "user", "content": user_msg}],
                     )
-                    break
-                else:
-                    logger.warning("  -> Invalid response on attempt %d", attempt + 1)
+
+                    # Track token usage
+                    usage = response.usage
+                    total_input_tokens += usage.input_tokens
+                    total_output_tokens += usage.output_tokens
+
+                    response_text = response.content[0].text
+                    analysis = parse_analysis_response(response_text)
+
+                    if analysis:
+                        db.update_article_analysis(conn, article_id, analysis)
+                        analyzed_count += 1
+                        logger.info(
+                            "  -> %s (%.1f) [%s]",
+                            analysis["sentiment_label"],
+                            analysis["sentiment_score"],
+                            analysis["location_relevance"],
+                        )
+                        break
+                    else:
+                        logger.warning("  -> Invalid response on attempt %d", attempt + 1)
+                        if attempt < max_retries - 1:
+                            time.sleep(2 ** attempt)
+
+                except Exception as e:
+                    logger.error("  -> API error on attempt %d: %s", attempt + 1, e)
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
+                    else:
+                        error_count += 1
 
-            except Exception as e:
-                logger.error("  -> API error on attempt %d: %s", attempt + 1, e)
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                else:
-                    error_count += 1
+            # Report progress after each article
+            if progress_callback is not None:
+                progress_callback(idx + 1, total)
 
-        # Report progress after each article
-        if progress_callback is not None:
-            progress_callback(idx + 1, total)
-
-        # Brief pause between API calls
-        time.sleep(0.25)
-
-    conn.close()
+            # Brief pause between API calls
+            time.sleep(0.25)
+    finally:
+        conn.close()
 
     summary = {
         "analyzed": analyzed_count,

@@ -12,7 +12,7 @@ import json
 import logging
 import math
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("wyoming_pulse.sentiment_index")
 
@@ -89,14 +89,16 @@ def compute_weekly_buckets(conn, state=None, county_fips=None, weeks_back=WSI_WE
     article dicts with: id, title, published_date, sentiment_score,
     entities_mentioned (as list), state, location_relevance.
     """
-    cutoff = (datetime.utcnow() - timedelta(weeks=weeks_back)).strftime("%Y-%m-%d")
+    cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(weeks=weeks_back)).strftime("%Y-%m-%d")
 
     where = "analyzed = 1 AND published_date IS NOT NULL AND published_date >= ?"
     params = [cutoff]
     if county_fips:
+        fips_unpadded = county_fips.lstrip("0") or "0"
+        fips_padded = county_fips.zfill(5)
         where += (" AND articles.id IN "
-                  "(SELECT article_id FROM article_states WHERE county_fips = ?)")
-        params.append(county_fips)
+                  "(SELECT article_id FROM article_states WHERE county_fips IN (?, ?))")
+        params.extend([fips_unpadded, fips_padded])
     elif state:
         where += " AND state = ?"
         params.append(state)
@@ -219,7 +221,7 @@ def compute_wsi(conn, state=None, county_fips=None, weeks_back=WSI_WEEKS_BACK):
     if not buckets:
         return {"current_wsi": None, "raw_avg": None, "week_count": 0}
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     current_monday = now - timedelta(days=now.weekday())
     current_monday_str = current_monday.strftime("%Y-%m-%d")
 
@@ -268,11 +270,11 @@ def compute_wsi_trend(conn, state=None, county_fips=None, weeks_back=WSI_WEEKS_B
     """
     buckets = compute_weekly_buckets(conn, state=state, county_fips=county_fips, weeks_back=weeks_back)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     current_monday = now - timedelta(days=now.weekday())
 
     # Build the full week range
-    cutoff = datetime.utcnow() - timedelta(weeks=weeks_back)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(weeks=weeks_back)
     cutoff_monday = cutoff - timedelta(days=cutoff.weekday())
 
     # Compute per-week scores
@@ -333,7 +335,7 @@ def compute_period_comparison(conn, state=None, county_fips=None):
 
     Returns dict with current_4wk, prior_4wk, change, direction.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     current_monday = now - timedelta(days=now.weekday())
 
     # Current 4 weeks: most recent 4 complete weeks

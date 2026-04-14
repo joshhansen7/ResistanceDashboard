@@ -95,6 +95,11 @@
 <script>
 const DATA = {{REPORT_DATA}};
 
+function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 Chart.defaults.color = '#6b7280';
 Chart.defaults.borderColor = 'rgba(26,31,46,0.5)';
 Chart.defaults.font.family = "'Inter', sans-serif";
@@ -118,14 +123,17 @@ function sColor(s) {
 function sPill(label) {
     const cls = (label||'').includes('positive') ? 'pos' : (label||'').includes('negative') ? 'neg' : 'neut';
     const map = { strongly_positive:'V.POS', slightly_positive:'POS', neutral:'NEU', slightly_negative:'NEG', strongly_negative:'V.NEG' };
-    return `<span class="pill pill-${cls}">${map[label]||label||'--'}</span>`;
+    return `<span class="pill pill-${cls}">${escapeHtml(map[label]||label||'--')}</span>`;
 }
 
 const topicNames = { energy_ratepayer:'Energy/Ratepayer', water:'Water', jobs_economic:'Jobs/Econ',
     land_use_wildlife:'Land/Wildlife', regulation_transparency:'Regulation', tax_incentives:'Tax',
     national_security_ai:'NatSec/AI', community_impact:'Community' };
 
-const stateAbbr = { wyoming:'WY', texas:'TX', michigan:'MI', nationwide:'US', other:'??' };
+// State abbreviation: use 2-char uppercase of the state key as a reasonable default,
+// with special handling for multi-word states and known special values.
+const _stateAbbrMap = {"alabama":"AL","alaska":"AK","arizona":"AZ","arkansas":"AR","california":"CA","colorado":"CO","connecticut":"CT","delaware":"DE","florida":"FL","georgia":"GA","hawaii":"HI","idaho":"ID","illinois":"IL","indiana":"IN","iowa":"IA","kansas":"KS","kentucky":"KY","louisiana":"LA","maine":"ME","maryland":"MD","massachusetts":"MA","michigan":"MI","minnesota":"MN","mississippi":"MS","missouri":"MO","montana":"MT","nebraska":"NE","nevada":"NV","new hampshire":"NH","new jersey":"NJ","new mexico":"NM","new york":"NY","north carolina":"NC","north dakota":"ND","ohio":"OH","oklahoma":"OK","oregon":"OR","pennsylvania":"PA","rhode island":"RI","south carolina":"SC","south dakota":"SD","tennessee":"TN","texas":"TX","utah":"UT","vermont":"VT","virginia":"VA","washington":"WA","west virginia":"WV","wisconsin":"WI","wyoming":"WY","district of columbia":"DC","nationwide":"US"};
+const stateAbbr = new Proxy(_stateAbbrMap, { get: (t, k) => t[k] || (k||'').toUpperCase().substring(0,2) });
 const fmtDate = iso => iso ? new Date(iso).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '--';
 
 // Metrics
@@ -148,7 +156,7 @@ document.getElementById('metricsRow').innerHTML = [
 if (w.by_state) {
     document.getElementById('stateCards').innerHTML = Object.entries(w.by_state).map(([state, wsi]) => {
         return `<div class="state-card" style="border-left:3px solid ${sColor(wsi)}">
-            <div class="sc-label">${state.charAt(0).toUpperCase()+state.slice(1)}</div>
+            <div class="sc-label">${escapeHtml(state.charAt(0).toUpperCase()+state.slice(1))}</div>
             <div class="sc-value" style="color:${sColor(wsi)}">${wsi !== null ? wsi.toFixed(2) : '--'}</div>
         </div>`;
     }).join('');
@@ -206,12 +214,12 @@ if (DATA.articles.length === 0) {
     tbody.innerHTML = '<tr><td colspan="6" class="no-data">No articles</td></tr>';
 } else {
     tbody.innerHTML = DATA.articles.map(a => `<tr>
-        <td class="title-cell">${a.title}</td>
-        <td>${a.source}</td>
+        <td class="title-cell">${escapeHtml(a.title)}</td>
+        <td>${escapeHtml(a.source)}</td>
         <td>${fmtDate(a.date)}</td>
         <td>${sPill(a.label)}</td>
-        <td>${stateAbbr[a.state] || (a.state||'').toUpperCase()}</td>
-        <td>${(a.location||'').replace(/_/g,' ')}</td>
+        <td>${escapeHtml(stateAbbr[a.state] || (a.state||'').toUpperCase())}</td>
+        <td>${escapeHtml((a.location||'').replace(/_/g,' '))}</td>
     </tr>`).join('');
 }
 </script>

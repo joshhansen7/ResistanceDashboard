@@ -11,6 +11,7 @@
     --bg-hover:      #141c2b;
 
     --border:        #1a1f2e;
+    --border-primary:#1a1f2e;
     --border-active: #14b8a6;
 
     --text-primary:  #e2e2e2;
@@ -455,6 +456,11 @@ body::after {
     border: 1px solid var(--border-primary);
     padding: 12px 14px;
 }
+.period-card-all {
+    flex: none;
+    width: 100%;
+    min-width: 100%;
+}
 .period-card-label {
     font-size: 9px;
     text-transform: uppercase;
@@ -686,13 +692,13 @@ body::after {
 }
 .sent-dist-labels {
     display: flex;
-    gap: 4px 6px;
+    gap: 3px 4px;
     flex-wrap: wrap;
     margin-top: 6px;
     font-family: var(--font-data);
-    font-size: 8px;
+    font-size: 7.5px;
     font-weight: 500;
-    letter-spacing: 0.02em;
+    letter-spacing: 0;
 }
 
 /* ═══ CHART PANELS ═══ */
@@ -1046,6 +1052,9 @@ a.article-link:hover {
 
 .pill-loc    { background: rgba(20,184,166,0.1); color: var(--accent-teal); }
 .pill-state  { background: rgba(168,85,247,0.12); color: #c084fc; }
+.pill-relevance { font-size: 0.65rem; padding: 1px 5px; margin-left: 4px; vertical-align: middle; }
+.pill-primary   { background: rgba(34,197,94,0.15); color: #4ade80; }
+.pill-mentioned { background: rgba(250,204,21,0.15); color: #facc15; }
 .pill-rss    { background: rgba(14,165,233,0.12); color: var(--accent-blue); }
 .pill-web    { background: rgba(20,184,166,0.12); color: var(--accent-teal); }
 
@@ -1625,30 +1634,8 @@ a.article-link:hover {
 }
 
 /* ═══ ARTICLE DETAIL PAGE ═══ */
-.article-detail-page { max-width: 900px; }
-.article-detail-page .meta-row { color: var(--text-secondary); margin-bottom: 16px; font-family: var(--font-data); font-size: 11px; }
 .article-detail-page .meta-row a { color: var(--accent-teal); text-decoration: none; word-break: break-all; }
 .article-detail-page .meta-row a:hover { text-decoration: underline; }
-.article-detail-page .detail-section { margin-bottom: 20px; }
-.article-detail-page .detail-section h3 {
-    font-family: var(--font-ui);
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-    margin-bottom: 6px;
-}
-.article-detail-page .detail-text { color: var(--text-primary); line-height: 1.6; font-size: 0.85rem; }
-.article-detail-page .state-card {
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 8px 12px;
-    margin-bottom: 6px;
-    display: inline-block;
-    margin-right: 8px;
-}
-.article-detail-page .state-card .state-name { color: var(--accent-teal); font-weight: 600; font-size: 0.85rem; }
 .article-detail-page .state-card .state-info { color: var(--text-muted); font-size: 0.8rem; font-family: var(--font-data); }
 .article-detail-page .pill-wrap { display: flex; flex-wrap: wrap; gap: 6px; }
 .article-detail-page .sentiment-block {
@@ -1661,17 +1648,6 @@ a.article-link:hover {
     font-family: var(--font-data);
     font-size: 20px;
     font-weight: 700;
-}
-.raw-json {
-    font-family: var(--font-data);
-    font-size: 0.75rem;
-    background: var(--bg-surface);
-    padding: 12px;
-    border-radius: 4px;
-    max-height: 300px;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    color: var(--text-muted);
 }
 .collapsible-toggle {
     background: none;
@@ -1732,6 +1708,48 @@ a.article-link:hover {
     border: 1px solid var(--border);
     margin-bottom: 4px;
     display: block;
+}
+
+/* ═══ ACCESSIBILITY: FOCUS VISIBLE ═══ */
+
+/* Global focus-visible outline for keyboard navigation */
+:focus-visible {
+    outline: 2px solid var(--accent-teal);
+    outline-offset: 2px;
+}
+
+/* Remove default focus ring for mouse users */
+:focus:not(:focus-visible) {
+    outline: none;
+}
+
+/* Specific overrides for elements that need different treatment */
+.article-card:focus-visible,
+.nav-item:focus-visible {
+    outline: 2px solid var(--accent-teal);
+    outline-offset: -2px;
+    border-radius: 4px;
+}
+
+button:focus-visible,
+.btn:focus-visible,
+select:focus-visible,
+input:focus-visible {
+    outline: 2px solid var(--accent-teal);
+    outline-offset: 1px;
+}
+
+/* Table rows */
+tr:focus-visible {
+    outline: 2px solid var(--accent-teal);
+    outline-offset: -2px;
+}
+
+/* Sort headers */
+th[onclick]:focus-visible,
+th[role="button"]:focus-visible {
+    outline: 2px solid var(--accent-teal);
+    outline-offset: -2px;
 }
 
 /* ═══ RESPONSIVE ═══ */

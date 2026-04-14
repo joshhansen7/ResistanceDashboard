@@ -9,7 +9,7 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -86,7 +86,7 @@ def run_historical_backfill(start_date="2025-09-01", end_date=None,
         Summary dict with counts.
     """
     if end_date is None:
-        end_date = datetime.utcnow().strftime("%Y-%m-%d")
+        end_date = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
 
     config = load_config()
     pipeline = config.get("pipeline", {})
