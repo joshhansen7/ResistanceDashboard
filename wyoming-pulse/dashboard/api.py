@@ -53,6 +53,7 @@ def _run_in_background(task_type, target_fn, **kwargs):
             "finished": None,
             "result": None,
             "error": None,
+            "progress": None,
         }
         # Prune old tasks to prevent unbounded memory growth
         if len(_tasks) > 50:
@@ -80,6 +81,30 @@ def _run_in_background(task_type, target_fn, **kwargs):
     return task_id
 
 
+def _create_tracked_task(task_type):
+    """Create a task record with progress support and return its id."""
+    task_id = str(uuid.uuid4())[:8]
+    with _tasks_lock:
+        _tasks[task_id] = {
+            "task_id": task_id,
+            "type": task_type,
+            "status": "running",
+            "started": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+            "finished": None,
+            "result": None,
+            "error": None,
+            "progress": None,
+        }
+    return task_id
+
+
+def _update_task_progress(task_id, progress):
+    """Update progress payload for a tracked task."""
+    with _tasks_lock:
+        if task_id in _tasks:
+            _tasks[task_id]["progress"] = progress
+
+
 def get_conn():
     """Get a database connection using the configured path."""
     return db.get_connection(current_app.config["DB_PATH"])
@@ -93,6 +118,31 @@ def _safe_json_loads(value, default):
         return json.loads(value)
     except (ValueError, TypeError):
         return default
+
+
+def _active_states(conn):
+    """Return tracked states with counts and reference data."""
+    rows = conn.execute(
+        "SELECT ast.state, COUNT(DISTINCT ast.article_id) as count "
+        "FROM article_states ast "
+        "JOIN articles a ON a.id = ast.article_id "
+        "WHERE a.analyzed = 1 AND ast.state IS NOT NULL "
+        "AND ast.state NOT IN ('nationwide', 'other') "
+        "GROUP BY ast.state ORDER BY ast.state ASC"
+    ).fetchall()
+
+    states_list = []
+    for r in rows:
+        key = r["state"]
+        info = geo.get_state_info(key)
+        states_list.append({
+            "key": key,
+            "name": info["name"] if info else key.title(),
+            "abbr": info["abbr"] if info else key.upper()[:2],
+            "fips": info["fips"] if info else None,
+            "article_count": r["count"],
+        })
+    return states_list
 
 
 def fips_pair(fips):
@@ -226,29 +276,7 @@ def states():
     """Return all states with analyzed articles, with reference data."""
     conn = get_conn()
     try:
-        # Use article_states junction table so multi-state articles
-        # count for each state they mention
-        rows = conn.execute(
-            "SELECT ast.state, COUNT(DISTINCT ast.article_id) as count "
-            "FROM article_states ast "
-            "JOIN articles a ON a.id = ast.article_id "
-            "WHERE a.analyzed = 1 AND ast.state IS NOT NULL "
-            "AND ast.state NOT IN ('nationwide', 'other') "
-            "GROUP BY ast.state ORDER BY ast.state ASC"
-        ).fetchall()
-
-        states_list = []
-        for r in rows:
-            key = r["state"]
-            info = geo.get_state_info(key)
-            states_list.append({
-                "key": key,
-                "name": info["name"] if info else key.title(),
-                "abbr": info["abbr"] if info else key.upper()[:2],
-                "fips": info["fips"] if info else None,
-                "article_count": r["count"],
-            })
-        return jsonify({"states": states_list})
+        return jsonify({"states": _active_states(conn)})
     finally:
         conn.close()
 
@@ -308,17 +336,53 @@ def sentiment_index_endpoint():
         state = request.args.get("state") or None
         county_fips = request.args.get("county_fips") or None
         weeks_back = request.args.get("weeks_back", 26, type=int)
-
-        wsi = sentiment_index.compute_wsi(conn, state=state, county_fips=county_fips, weeks_back=weeks_back)
-        trend = sentiment_index.compute_wsi_trend(conn, state=state, county_fips=county_fips, weeks_back=weeks_back)
-        comparison = sentiment_index.compute_period_comparison(conn, state=state, county_fips=county_fips)
+        bundle = sentiment_index.compute_wsi_bundle(
+            conn,
+            state=state,
+            county_fips=county_fips,
+            weeks_back=weeks_back,
+        )
 
         return jsonify({
-            "current_wsi": wsi["current_wsi"],
-            "raw_avg": wsi["raw_avg"],
-            "trend": trend,
-            "period_comparison": comparison,
+            "current_wsi": bundle["current_wsi"],
+            "raw_avg": bundle["raw_avg"],
+            "trend": bundle["trend"],
+            "period_comparison": bundle["period_comparison"],
         })
+    finally:
+        conn.close()
+
+
+@bp.route("/sentiment-index-cards")
+def sentiment_index_cards():
+    """Batch sentiment-index summaries for the period cards view."""
+    conn = get_conn()
+    try:
+        weeks_back = request.args.get("weeks_back", 26, type=int)
+        cards = []
+
+        overall = sentiment_index.compute_wsi_bundle(conn, weeks_back=weeks_back)
+        cards.append({
+            "key": "",
+            "name": "All States",
+            "current_wsi": overall["current_wsi"],
+            "period_comparison": overall["period_comparison"],
+        })
+
+        for state_info in _active_states(conn):
+            bundle = sentiment_index.compute_wsi_bundle(
+                conn,
+                state=state_info["key"],
+                weeks_back=weeks_back,
+            )
+            cards.append({
+                "key": state_info["key"],
+                "name": state_info["name"],
+                "current_wsi": bundle["current_wsi"],
+                "period_comparison": bundle["period_comparison"],
+            })
+
+        return jsonify({"cards": cards})
     finally:
         conn.close()
 
@@ -497,15 +561,21 @@ def location_weekly():
     conn = get_conn()
     try:
         weeks_back = request.args.get("weeks_back", 12, type=int)
-        rows = conn.execute(
+        state = request.args.get("state") or None
+        sql = (
             "SELECT ast.state as state, ast.county_name as county_name, "
             "a.published_date as published_date, a.sentiment_score as sentiment_score "
             "FROM article_states ast "
             "JOIN articles a ON a.id = ast.article_id "
             "WHERE a.analyzed = 1 AND a.published_date IS NOT NULL "
             "AND ast.state IS NOT NULL "
-            "ORDER BY a.published_date ASC"
-        ).fetchall()
+        )
+        params = []
+        if state:
+            sql += "AND ast.state = ? "
+            params.append(state)
+        sql += "ORDER BY a.published_date ASC"
+        rows = conn.execute(sql, params).fetchall()
 
         # Group by state > county > week. Use county_name from the junction
         # table directly (already normalized at ingest time) — do NOT call
@@ -1088,10 +1158,16 @@ def control_unanalyzed():
     """Get articles approved but not yet analyzed."""
     conn = get_conn()
     try:
+        limit = max(1, min(int(request.args.get("limit", 200)), 1000))
+        offset = max(0, int(request.args.get("offset", 0)))
+        total = conn.execute(
+            "SELECT COUNT(*) as c FROM articles WHERE analyzed = 0"
+        ).fetchone()["c"]
         rows = conn.execute(
             "SELECT id, title, source, published_date, state, url "
             "FROM articles WHERE analyzed = 0 "
-            "ORDER BY ingested_date DESC"
+            "ORDER BY ingested_date DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
         articles = [
             {
@@ -1104,7 +1180,13 @@ def control_unanalyzed():
             }
             for r in rows
         ]
-        return jsonify({"articles": articles, "total": len(articles)})
+        return jsonify({
+            "articles": articles,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(articles) < total,
+        })
     finally:
         conn.close()
 
@@ -1127,7 +1209,6 @@ def control_run_analysis():
     data = request.get_json(silent=True) or {}
     limit = data.get("limit") or None  # None = all
 
-    db_path = current_app.config["DB_PATH"]
     task_id = str(uuid.uuid4())[:8]
     with _tasks_lock:
         _tasks[task_id] = {
@@ -1138,34 +1219,19 @@ def control_run_analysis():
             "finished": None,
             "result": None,
             "error": None,
-            "progress": None,
+            "progress": {"phase": "starting"},
         }
 
-    def _progress(current, total):
+    def _set_progress(progress):
         with _tasks_lock:
-            _tasks[task_id]["progress"] = {"current": current, "total": total}
+            _tasks[task_id]["progress"] = progress
+
+    def _progress(progress):
+        _set_progress(progress)
 
     def _worker():
         try:
-            scrape_result = {}
-
-            # Step 1: Scrape full text for thin articles (skip when batch-limited)
-            if not limit:
-                import scraper
-                conn = db.get_connection(db_path)
-                try:
-                    scrape_result = scraper.scrape_thin_articles(conn)
-                    logger.info("Scraping: %d scraped, %d failed",
-                                scrape_result.get("scraped", 0),
-                                scrape_result.get("failed", 0))
-                except Exception as e:
-                    logger.warning("Scraping step failed (continuing): %s", e)
-                finally:
-                    conn.close()
-
-            # Step 2: Run sentiment analysis
             result = analyze.analyze_articles(limit=limit, progress_callback=_progress)
-            result["scrape_scraped"] = scrape_result.get("scraped", 0)
             with _tasks_lock:
                 _tasks[task_id]["status"] = "completed"
                 _tasks[task_id]["finished"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
@@ -1204,8 +1270,31 @@ def control_run_websearch():
         days_back = int(days_back)
     except (ValueError, TypeError):
         days_back = 30
-    task_id = _run_in_background("websearch", websearch.run_websearch,
-                                  query=query, days_back=days_back, state=state)
+    task_id = _create_tracked_task("websearch")
+
+    def _progress(progress):
+        _update_task_progress(task_id, progress)
+
+    def _worker():
+        try:
+            result = websearch.run_websearch(
+                query=query,
+                days_back=days_back,
+                state=state,
+                progress_callback=_progress,
+            )
+            with _tasks_lock:
+                _tasks[task_id]["status"] = "completed"
+                _tasks[task_id]["finished"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+                _tasks[task_id]["result"] = result
+        except Exception as e:
+            logger.error("Task %s (websearch) failed: %s", task_id, e)
+            with _tasks_lock:
+                _tasks[task_id]["status"] = "error"
+                _tasks[task_id]["finished"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+                _tasks[task_id]["error"] = str(e)
+
+    threading.Thread(target=_worker, daemon=True).start()
     return jsonify({"task_id": task_id})
 
 
@@ -1224,10 +1313,34 @@ def control_run_sweep():
         days_back = int(days_back)
     except (ValueError, TypeError):
         days_back = 7
-    task_id = _run_in_background("sweep", websearch.run_websearch,
-                                  per_state=True, days_back=days_back,
-                                  start_date=start_date, end_date=end_date,
-                                  state=state, skip_analysis=skip_analysis)
+    task_id = _create_tracked_task("sweep")
+
+    def _progress(progress):
+        _update_task_progress(task_id, progress)
+
+    def _worker():
+        try:
+            result = websearch.run_websearch(
+                per_state=True,
+                days_back=days_back,
+                start_date=start_date,
+                end_date=end_date,
+                state=state,
+                skip_analysis=skip_analysis,
+                progress_callback=_progress,
+            )
+            with _tasks_lock:
+                _tasks[task_id]["status"] = "completed"
+                _tasks[task_id]["finished"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+                _tasks[task_id]["result"] = result
+        except Exception as e:
+            logger.error("Task %s (sweep) failed: %s", task_id, e)
+            with _tasks_lock:
+                _tasks[task_id]["status"] = "error"
+                _tasks[task_id]["finished"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+                _tasks[task_id]["error"] = str(e)
+
+    threading.Thread(target=_worker, daemon=True).start()
     return jsonify({"task_id": task_id})
 
 
@@ -1284,6 +1397,8 @@ def control_pending():
     search_id = request.args.get("search_id", "")
     state_filter = request.args.get("state", "")
     source_type_filter = request.args.get("source_type", "")
+    limit = max(1, min(int(request.args.get("limit", 250)), 1000))
+    offset = max(0, int(request.args.get("offset", 0)))
     conn = get_conn()
     try:
         where = "status = 'pending'"
@@ -1298,10 +1413,18 @@ def control_pending():
             where += " AND source_type = ?"
             params.append(source_type_filter)
 
-        rows = conn.execute(
-            f"SELECT * FROM pending_articles WHERE {where} "
-            f"ORDER BY COALESCE(relevance_score, 0) DESC, created_date DESC",
+        total = conn.execute(
+            f"SELECT COUNT(*) as c FROM pending_articles WHERE {where}",
             params,
+        ).fetchone()["c"]
+
+        rows = conn.execute(
+            f"SELECT id, search_id, source, title, url, published_date, summary, "
+            f"relevance_score, relevance_reason, created_date, source_type, state "
+            f"FROM pending_articles WHERE {where} "
+            f"ORDER BY COALESCE(relevance_score, 0) DESC, created_date DESC "
+            f"LIMIT ? OFFSET ?",
+            params + [limit, offset],
         ).fetchall()
 
         articles = []
@@ -1314,9 +1437,6 @@ def control_pending():
                 "url": r["url"],
                 "published_date": r["published_date"],
                 "summary": r["summary"],
-                "matched_keywords": _safe_json_loads(r["matched_keywords"], []),
-                "keyword_score": r["keyword_score"],
-                "location_relevance": r["location_relevance"],
                 "relevance_score": r["relevance_score"],
                 "relevance_reason": r["relevance_reason"],
                 "created_date": r["created_date"],
@@ -1331,7 +1451,14 @@ def control_pending():
         ).fetchall()
         stats = {r["source_type"] or "websearch": r["c"] for r in stats_rows}
 
-        return jsonify({"articles": articles, "total": len(articles), "stats": stats})
+        return jsonify({
+            "articles": articles,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(articles) < total,
+            "stats": stats,
+        })
     finally:
         conn.close()
 

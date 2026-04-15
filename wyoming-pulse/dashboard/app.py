@@ -17,6 +17,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 def create_app():
     """Create and configure the Flask application."""
+    import db
+
     app = Flask(
         __name__,
         template_folder=str(Path(__file__).parent / "templates"),
@@ -24,6 +26,7 @@ def create_app():
     )
 
     app.config["DB_PATH"] = str(PROJECT_ROOT / "data" / "wyoming_pulse.db")
+    db.init_db(app.config["DB_PATH"])
 
     from . import api
     app.register_blueprint(api.bp)

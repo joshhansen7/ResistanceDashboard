@@ -230,12 +230,17 @@ def scrape_article_metadata(url):
         return {"source": source_display, "url": resolved_url}
 
 
-def scrape_thin_articles(conn, limit=None, progress_callback=None):
+def scrape_thin_articles(conn, limit=None, progress_callback=None, article_ids=None):
     """
     Find articles with thin full_text and attempt to scrape full content.
     Returns dict with summary stats.
     """
     where = "analyzed = 0 AND url IS NOT NULL AND url != ''"
+    params = []
+    if article_ids:
+        placeholders = ",".join("?" * len(article_ids))
+        where += f" AND id IN ({placeholders})"
+        params.extend(article_ids)
     sql = f"""
     SELECT id, url, full_text, title FROM articles
     WHERE {where}
@@ -244,7 +249,7 @@ def scrape_thin_articles(conn, limit=None, progress_callback=None):
     if limit:
         sql += f" LIMIT {int(limit)}"
 
-    rows = conn.execute(sql).fetchall()
+    rows = conn.execute(sql, params).fetchall()
 
     # Filter to thin content
     thin = [r for r in rows if not r["full_text"] or len(r["full_text"]) < THIN_CONTENT_THRESHOLD]
@@ -257,6 +262,8 @@ def scrape_thin_articles(conn, limit=None, progress_callback=None):
 
     scraped = 0
     failed = 0
+    if progress_callback:
+        progress_callback(0, len(thin))
 
     for i, row in enumerate(thin):
         url = row["url"]

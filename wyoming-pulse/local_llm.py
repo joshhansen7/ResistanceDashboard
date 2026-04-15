@@ -17,6 +17,10 @@ logger = logging.getLogger("wyoming_pulse.local_llm")
 
 _ollama_checked = False
 _ollama_available = False
+_ollama_checked_at = 0.0
+_ollama_models = {}
+
+OLLAMA_STATUS_TTL_SECONDS = 30
 
 
 def _get_config():
@@ -27,20 +31,28 @@ def _get_config():
 
 def is_available():
     """Check if Ollama is reachable."""
-    global _ollama_checked, _ollama_available
+    global _ollama_checked, _ollama_available, _ollama_checked_at
     llm_cfg = _get_config()
     if not llm_cfg.get("enabled", True):
         return False
 
     base_url = llm_cfg.get("base_url", "http://localhost:11434")
+    now = time.time()
+    if _ollama_checked and (now - _ollama_checked_at) < OLLAMA_STATUS_TTL_SECONDS:
+        return _ollama_available
+
     try:
         resp = requests.get(f"{base_url}/api/tags", timeout=3)
         _ollama_available = resp.status_code == 200
+        _ollama_models[base_url] = resp.json().get("models", []) if _ollama_available else []
         _ollama_checked = True
+        _ollama_checked_at = now
         return _ollama_available
     except Exception:
         _ollama_available = False
+        _ollama_models[base_url] = []
         _ollama_checked = True
+        _ollama_checked_at = now
         return False
 
 
@@ -50,6 +62,8 @@ def ensure_running():
     Auto-launches Ollama on macOS if not running.
     Returns True if ready, False if unavailable.
     """
+    global _ollama_checked
+
     llm_cfg = _get_config()
     if not llm_cfg.get("enabled", True):
         logger.info("Local LLM disabled in config")
@@ -67,6 +81,7 @@ def ensure_running():
         logger.info("Pulling model %s...", model)
         try:
             subprocess.run(["ollama", "pull", model], check=True, timeout=600)
+            _ollama_checked = False
             return True
         except Exception as e:
             logger.warning("Failed to pull model %s: %s", model, e)
@@ -95,6 +110,7 @@ def ensure_running():
             logger.info("Pulling model %s...", model)
             try:
                 subprocess.run(["ollama", "pull", model], check=True, timeout=600)
+                _ollama_checked = False
                 return True
             except Exception as e:
                 logger.warning("Failed to pull model %s: %s", model, e)
@@ -107,15 +123,15 @@ def ensure_running():
 def _model_available(base_url, model):
     """Check if a specific model is available in Ollama."""
     try:
-        resp = requests.get(f"{base_url}/api/tags", timeout=3)
-        if resp.status_code == 200:
-            models = resp.json().get("models", [])
-            model_base = model.split(":")[0]
-            for m in models:
-                name = m.get("name", "")
-                if name == model or name.startswith(model_base + ":") or name == model_base:
-                    return True
+        if not is_available():
             return False
+        models = _ollama_models.get(base_url, [])
+        model_base = model.split(":")[0]
+        for m in models:
+            name = m.get("name", "")
+            if name == model or name.startswith(model_base + ":") or name == model_base:
+                return True
+        return False
     except Exception:
         pass
     return False

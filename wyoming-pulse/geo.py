@@ -11,6 +11,7 @@ import os
 import re
 import time
 import unicodedata
+from contextlib import contextmanager
 from pathlib import Path
 
 import requests as _requests
@@ -414,6 +415,20 @@ def flush_place_cache():
         logger.info("Flushed place cache (%d entries) to %s", len(_place_cache), PLACE_TO_COUNTY_PATH)
     except Exception as e:
         logger.error("Failed to flush place cache: %s", e)
+
+
+@contextmanager
+def deferred_place_cache_flush():
+    """Batch cache writes so repeated geocodes only flush once at the end."""
+    global _defer_flush
+    prev = _defer_flush
+    _defer_flush = True
+    try:
+        yield
+    finally:
+        _defer_flush = prev
+        if not _defer_flush:
+            flush_place_cache()
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -367,6 +367,9 @@
                 </table>
                 </div>
                 <div class="no-data" id="queueEmpty" style="display:none">Queue is clear — no pending articles.</div>
+                <div style="margin-top:8px">
+                    <button class="btn-action" id="queueLoadMore" style="display:none" onclick="loadMoreQueue()">Load More</button>
+                </div>
                 <div class="task-status" id="queueStatus"></div>
             </div>
 
@@ -388,6 +391,9 @@
                     </table>
                 </div>
                 <div class="no-data" id="analysisEmpty" style="display:none">All articles have been analyzed.</div>
+                <div style="margin-top:8px">
+                    <button class="btn-action" id="analysisLoadMore" style="display:none" onclick="loadMoreAnalysis()">Load More</button>
+                </div>
                 <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
                     <select id="analysisBatchSize" style="padding:4px 6px;background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);font-family:var(--font-data);font-size:11px">
                         <option value="">All</option>

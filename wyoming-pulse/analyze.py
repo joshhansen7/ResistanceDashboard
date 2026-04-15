@@ -7,6 +7,7 @@ import logging
 import time
 
 import db
+import geo
 from shared import load_config, get_anthropic_client
 from utils import parse_json_response
 
@@ -168,11 +169,13 @@ def parse_analysis_response(response_text):
 
 def analyze_articles(config=None, limit=None, progress_callback=None):
     """
-    Analyze unanalyzed articles using Claude API.
-    Returns dict with summary statistics.
-    If limit is None, all unanalyzed articles are processed.
-    If progress_callback is provided, it is called as progress_callback(current, total)
-    after each article is processed.
+    Analyze a selected batch of unanalyzed articles using Claude API.
+    The batch is selected first, then any thin articles within that batch are scraped,
+    and finally that same batch is analyzed. This keeps behavior identical across
+    all batch sizes.
+
+    If progress_callback is provided, it is called with a dict payload such as:
+      {"phase": "preparing" | "scraping" | "analyzing", "current": n, "total": m}
     """
     if config is None:
         config = load_config()
@@ -205,12 +208,36 @@ def analyze_articles(config=None, limit=None, progress_callback=None):
         topic_descriptions=topic_descriptions_str,
     )
 
+    def emit_progress(payload):
+        if progress_callback is not None:
+            progress_callback(payload)
+
     conn = db.get_connection()
     try:
-        articles = db.get_unanalyzed_articles(conn, limit=limit)
+        batch = db.get_unanalyzed_articles(conn, limit=limit)
+
+        if not batch:
+            logger.info("No unanalyzed articles found.")
+            return {"analyzed": 0, "skipped": 0, "errors": 0}
+
+        batch_ids = [row["id"] for row in batch]
+        emit_progress({"phase": "preparing", "current": 0, "total": len(batch_ids)})
+
+        import scraper
+        scrape_result = scraper.scrape_thin_articles(
+            conn,
+            article_ids=batch_ids,
+            progress_callback=lambda current, total: emit_progress({
+                "phase": "scraping",
+                "current": current,
+                "total": total,
+            }),
+        )
+
+        articles = db.get_articles_by_ids(conn, batch_ids, unanalyzed_only=True)
 
         if not articles:
-            logger.info("No unanalyzed articles found.")
+            logger.info("Selected batch no longer has unanalyzed articles.")
             return {"analyzed": 0, "skipped": 0, "errors": 0}
 
         logger.info("Found %d articles to analyze", len(articles))
@@ -220,65 +247,69 @@ def analyze_articles(config=None, limit=None, progress_callback=None):
         total_output_tokens = 0
 
         total = len(articles)
-        for idx, article in enumerate(articles):
-            article_id = article["id"]
-            title = article["title"]
-            logger.info("Analyzing: %s", title[:60])
+        emit_progress({"phase": "analyzing", "current": 0, "total": total})
+        with geo.deferred_place_cache_flush():
+            for idx, article in enumerate(articles):
+                article_id = article["id"]
+                title = article["title"]
+                logger.info("Analyzing: %s", title[:60])
 
-            user_msg = build_user_message(article)
+                user_msg = build_user_message(article)
 
-            for attempt in range(max_retries):
-                try:
-                    response = client.messages.create(
-                        model=model,
-                        max_tokens=1024,
-                        timeout=timeout,
-                        system=system_prompt,
-                        messages=[{"role": "user", "content": user_msg}],
-                    )
-
-                    # Track token usage
-                    usage = response.usage
-                    total_input_tokens += usage.input_tokens
-                    total_output_tokens += usage.output_tokens
-
-                    response_text = response.content[0].text
-                    analysis = parse_analysis_response(response_text)
-
-                    if analysis:
-                        db.update_article_analysis(conn, article_id, analysis)
-                        analyzed_count += 1
-                        logger.info(
-                            "  -> %s (%.1f) [%s]",
-                            analysis["sentiment_label"],
-                            analysis["sentiment_score"],
-                            analysis["location_relevance"],
+                for attempt in range(max_retries):
+                    try:
+                        response = client.messages.create(
+                            model=model,
+                            max_tokens=1024,
+                            timeout=timeout,
+                            system=system_prompt,
+                            messages=[{"role": "user", "content": user_msg}],
                         )
-                        break
-                    else:
-                        logger.warning("  -> Invalid response on attempt %d", attempt + 1)
+
+                        # Track token usage
+                        usage = response.usage
+                        total_input_tokens += usage.input_tokens
+                        total_output_tokens += usage.output_tokens
+
+                        response_text = response.content[0].text
+                        analysis = parse_analysis_response(response_text)
+
+                        if analysis:
+                            db.update_article_analysis(conn, article_id, analysis)
+                            analyzed_count += 1
+                            logger.info(
+                                "  -> %s (%.1f) [%s]",
+                                analysis["sentiment_label"],
+                                analysis["sentiment_score"],
+                                analysis["location_relevance"],
+                            )
+                            break
+                        else:
+                            logger.warning("  -> Invalid response on attempt %d", attempt + 1)
+                            if attempt < max_retries - 1:
+                                time.sleep(2 ** attempt)
+
+                    except Exception as e:
+                        logger.error("  -> API error on attempt %d: %s", attempt + 1, e)
                         if attempt < max_retries - 1:
                             time.sleep(2 ** attempt)
+                        else:
+                            error_count += 1
 
-                except Exception as e:
-                    logger.error("  -> API error on attempt %d: %s", attempt + 1, e)
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
-                    else:
-                        error_count += 1
+                # Report progress after each article
+                emit_progress({"phase": "analyzing", "current": idx + 1, "total": total})
 
-            # Report progress after each article
-            if progress_callback is not None:
-                progress_callback(idx + 1, total)
-
-            # Brief pause between API calls
-            time.sleep(0.25)
+                # Brief pause between API calls
+                time.sleep(0.25)
     finally:
         conn.close()
 
     summary = {
         "analyzed": analyzed_count,
         "errors": error_count,
+        "scrape_scraped": scrape_result.get("scraped", 0),
+        "scrape_failed": scrape_result.get("failed", 0),
+        "scrape_skipped": scrape_result.get("skipped", 0),
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
     }

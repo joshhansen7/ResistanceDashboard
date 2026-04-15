@@ -92,13 +92,20 @@ CREATE TABLE IF NOT EXISTS article_states (
 );
 
 CREATE INDEX IF NOT EXISTS idx_articles_analyzed ON articles(analyzed);
+CREATE INDEX IF NOT EXISTS idx_articles_analyzed_ingested ON articles(analyzed, ingested_date DESC);
 CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published_date);
+CREATE INDEX IF NOT EXISTS idx_articles_analyzed_published ON articles(analyzed, published_date DESC);
 CREATE INDEX IF NOT EXISTS idx_articles_source ON articles(source);
 CREATE INDEX IF NOT EXISTS idx_articles_sentiment ON articles(sentiment_label);
 CREATE INDEX IF NOT EXISTS idx_pending_search ON pending_articles(search_id);
 CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_articles(status);
+CREATE INDEX IF NOT EXISTS idx_pending_url_status ON pending_articles(url, status);
+CREATE INDEX IF NOT EXISTS idx_pending_status_created ON pending_articles(status, created_date DESC);
 CREATE INDEX IF NOT EXISTS idx_article_states_state ON article_states(state);
 CREATE INDEX IF NOT EXISTS idx_article_states_article ON article_states(article_id);
+CREATE INDEX IF NOT EXISTS idx_article_states_county ON article_states(county_fips);
+CREATE INDEX IF NOT EXISTS idx_article_states_state_relevance_article ON article_states(state, relevance, article_id);
+CREATE INDEX IF NOT EXISTS idx_article_states_county_relevance_article ON article_states(county_fips, relevance, article_id);
 """
 
 
@@ -251,6 +258,24 @@ def get_unanalyzed_articles(conn, limit=20):
     LIMIT ?
     """
     return conn.execute(sql, (limit,)).fetchall()
+
+
+def get_articles_by_ids(conn, article_ids, unanalyzed_only=False):
+    """Get articles by id, ordered by ingest time for stable batch processing."""
+    if not article_ids:
+        return []
+
+    placeholders = ",".join("?" * len(article_ids))
+    clauses = [f"id IN ({placeholders})"]
+    if unanalyzed_only:
+        clauses.append("analyzed = 0")
+
+    sql = f"""
+    SELECT * FROM articles
+    WHERE {" AND ".join(clauses)}
+    ORDER BY ingested_date ASC
+    """
+    return conn.execute(sql, list(article_ids)).fetchall()
 
 
 def update_article_analysis(conn, article_id, analysis):

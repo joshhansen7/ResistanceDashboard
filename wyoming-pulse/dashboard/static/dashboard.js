@@ -153,15 +153,22 @@ function scoreToLabel(score) {
     return 'V.NEG';
 }
 
+function parseIsoDate(iso) {
+    if (!iso) return null;
+    const value = String(iso);
+    const needsUtcSuffix = value.includes('T') && !/(Z|[+-]\d{2}:\d{2})$/i.test(value);
+    return new Date(needsUtcSuffix ? `${value}Z` : value);
+}
+
 function fmtDate(iso) {
     if (!iso) return '--';
-    const d = new Date(iso);
+    const d = parseIsoDate(iso);
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 function fmtDateTime(iso) {
     if (!iso) return '--';
-    const d = new Date(iso);
+    const d = parseIsoDate(iso);
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
@@ -211,7 +218,7 @@ function destroyChart(id) {
 
 function timeAgo(iso) {
     if (!iso) return '--';
-    const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+    const m = Math.floor((Date.now() - parseIsoDate(iso).getTime()) / 60000);
     if (m < 1) return 'just now';
     if (m < 60) return m + 'm ago';
     const h = Math.floor(m / 60);
@@ -222,6 +229,24 @@ function timeAgo(iso) {
 function truncate(str, max) {
     if (!str) return '';
     return str.length > max ? str.slice(0, max) + '...' : str;
+}
+
+function elapsedSecondsFromIso(started) {
+    if (!started) return null;
+    const ms = Date.now() - parseIsoDate(started).getTime();
+    return Math.max(0, Math.floor(ms / 1000));
+}
+
+function formatElapsedSeconds(totalSeconds) {
+    if (totalSeconds === null || totalSeconds === undefined) return '--';
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    if (mins >= 60) {
+        const hours = Math.floor(mins / 60);
+        const remMins = mins % 60;
+        return `${hours}h ${remMins}m`;
+    }
+    return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
 }
 
 // Shared tooltip config
@@ -1066,12 +1091,13 @@ async function renderSentiment() {
         const stateFilter = (document.getElementById('sentStateFilter') || {}).value || '';
         const qs = stateFilter ? `?state=${stateFilter}` : '';
 
-        const [wsiData, topics, entities, articlesData, locWeekly] = await Promise.all([
+        const [overview, wsiData, topics, entities, articlesData, locWeekly] = await Promise.all([
+            fetchJSON(`/api/overview${qs}`),
             fetchJSON(`/api/sentiment-index${qs}`),
             fetchJSON(`/api/topics${qs}`),
             fetchJSON(`/api/entities${qs}`),
             fetchJSON(`/api/articles?limit=100${stateFilter ? '&state=' + stateFilter : ''}`),
-            fetchJSON('/api/location-weekly'),
+            fetchJSON(`/api/location-weekly${qs}`),
         ]);
 
         // A: WSI Trend Chart
@@ -1093,7 +1119,7 @@ async function renderSentiment() {
         renderKeyArticles(articlesData.articles);
 
         // G: Distribution
-        renderDistribution(articlesData.articles);
+        renderDistribution(overview.sentiment_distribution);
 
     } catch (err) { console.error('Sentiment error:', err); }
 }
@@ -1123,23 +1149,18 @@ function renderSentimentWSIChart(trend) {
 
 async function renderPeriodCards() {
     const container = document.getElementById('periodCards');
-    const activeStates = await getStates();
-    const stateKeys = ['', ...activeStates.map(s => s.key)];
-    const labels = ['All States', ...activeStates.map(s => s.name)];
 
     try {
-        const results = await Promise.all(
-            stateKeys.map(s => fetchJSON(`/api/sentiment-index${s ? '?state=' + s : ''}`))
-        );
+        const data = await fetchJSON('/api/sentiment-index-cards');
 
-        container.innerHTML = results.map((r, i) => {
-            const pc = r.period_comparison;
-            const wsi = r.current_wsi;
+        container.innerHTML = (data.cards || []).map((card, i) => {
+            const pc = card.period_comparison;
+            const wsi = card.current_wsi;
             const arrow = pc?.direction === 'improving' ? '\u25B2' : pc?.direction === 'declining' ? '\u25BC' : '\u25C6';
             const changeColor = pc?.direction === 'improving' ? 'var(--sent-5)' : pc?.direction === 'declining' ? 'var(--sent-1)' : 'var(--sent-3)';
             const isAll = i === 0;
             return `<div class="period-card${isAll ? ' period-card-all' : ''}" style="border-left: 3px solid ${sentimentColor(wsi)}">
-                <div class="period-card-label">${labels[i]}</div>
+                <div class="period-card-label">${card.name}</div>
                 <div class="period-card-wsi" style="color:${sentimentColor(wsi)}">${wsi !== null ? wsi.toFixed(2) : '--'}</div>
                 <div class="period-card-change" style="color:${changeColor}">${pc?.change !== null ? `${arrow} ${pc.change > 0 ? '+' : ''}${pc.change.toFixed(2)}` : '--'}</div>
             </div>`;
@@ -1392,17 +1413,22 @@ function attachHmTooltips(container) {
     });
 }
 
-async function renderDistribution(articles) {
+async function renderDistribution(distribution) {
     const canvas = document.getElementById('distributionChart');
     const noData = document.getElementById('distNoData');
     destroyChart('dist');
 
     try {
-        const data = articles || (await fetchJSON('/api/articles?limit=1000')).articles;
-        const counts = { strongly_positive: 0, slightly_positive: 0, neutral: 0, slightly_negative: 0, strongly_negative: 0 };
-        data.forEach(a => { if (a.sentiment_label && counts.hasOwnProperty(a.sentiment_label)) counts[a.sentiment_label]++; });
+        const counts = distribution || (await fetchJSON('/api/overview')).sentiment_distribution || {};
+        const segments = [
+            { key: 'strongly_positive', label: 'V.POS', color: '#22c55e' },
+            { key: 'slightly_positive', label: 'POS', color: '#84cc16' },
+            { key: 'neutral', label: 'NEU', color: '#eab308' },
+            { key: 'slightly_negative', label: 'NEG', color: '#f97316' },
+            { key: 'strongly_negative', label: 'V.NEG', color: '#ef4444' },
+        ].filter(segment => (counts[segment.key] || 0) > 0);
 
-        const total = Object.values(counts).reduce((a, b) => a + b, 0);
+        const total = segments.reduce((sum, segment) => sum + (counts[segment.key] || 0), 0);
         if (total === 0) { canvas.style.display = 'none'; noData.style.display = 'block'; return; }
         canvas.style.display = 'block';
         noData.style.display = 'none';
@@ -1410,10 +1436,10 @@ async function renderDistribution(articles) {
         charts.dist = new Chart(canvas, {
             type: 'doughnut',
             data: {
-                labels: [`V.POS ${counts.strongly_positive}`, `POS ${counts.slightly_positive}`, `NEU ${counts.neutral}`, `NEG ${counts.slightly_negative}`, `V.NEG ${counts.strongly_negative}`],
+                labels: segments.map(segment => `${segment.label} ${counts[segment.key]}`),
                 datasets: [{
-                    data: [counts.strongly_positive, counts.slightly_positive, counts.neutral, counts.slightly_negative, counts.strongly_negative],
-                    backgroundColor: ['#22c55e', '#84cc16', '#eab308', '#f97316', '#ef4444'],
+                    data: segments.map(segment => counts[segment.key]),
+                    backgroundColor: segments.map(segment => segment.color),
                     borderWidth: 0,
                     hoverOffset: 4,
                 }]
@@ -1796,8 +1822,19 @@ function exportReport() { window.location.href = '/api/export'; }
 //  PAGE 5: CONTROL
 // ══════════════════════════════════════════════
 let _pollTimers = {};
+let _pollFailures = {};
 let _queueArticles = [];
 let _queueSort = { key: 'relevance_score', dir: 'desc' };
+let _queueOffset = 0;
+let _queueTotal = 0;
+let _queueHasMore = false;
+let _queueSelectedIds = new Set();
+const QUEUE_PAGE_SIZE = 250;
+const QUEUE_FETCH_LIMIT = 1000;
+let _queueDesiredCount = QUEUE_PAGE_SIZE;
+let _analysisOffset = 0;
+let _analysisTotal = 0;
+let _analysisHasMore = false;
 
 function sortQueueArticles() {
     const { key, dir } = _queueSort;
@@ -1850,11 +1887,11 @@ function renderQueueRows() {
         const stateAbbr = getStateAbbr(a.state);
         const typeCls = a.source_type === 'rss' ? 'pill-rss' : 'pill-web';
         const typeLabel = a.source_type === 'rss' ? 'RSS' : 'WEB';
-        const preChecked = hasScore && a.relevance_score >= 7;
+        const isChecked = _queueSelectedIds.has(a.id);
         const reason = a.relevance_reason || '';
         const summary = a.summary ? escapeHtml(a.summary) : '<span style="color:var(--text-muted)">No summary</span>';
         return `<tr style="cursor:pointer" onclick="togglePendingExpand(${a.id}, event)">
-            <td><input type="checkbox" class="queue-check" data-id="${a.id}" ${preChecked ? 'checked' : ''} onchange="updateQueueSelectedCount()" onclick="event.stopPropagation()"></td>
+            <td><input type="checkbox" class="queue-check" data-id="${a.id}" ${isChecked ? 'checked' : ''} onchange="onQueueCheckChanged(this)" onclick="event.stopPropagation()"></td>
             <td><span class="relevance-score ${scoreCls}">${scoreText}</span></td>
             <td class="text-cell" title="${escapeHtml(a.title)}"><a href="${articleUrl(a.url, 'pending_articles')}" target="_blank" rel="noopener" class="article-link" onclick="event.stopPropagation()">${escapeHtml(titleTrunc)}</a></td>
             <td>${escapeHtml(a.source || '')}</td>
@@ -1873,28 +1910,72 @@ function renderQueueRows() {
     updateQueueSelectedCount();
 }
 
-async function renderReviewQueue() {
+async function renderReviewQueue(options = {}) {
+    const { append = false, preserveLoadedCount = false } = options;
     const table = document.getElementById('queueTable');
-    const tbody = document.getElementById('queueBody');
     const empty = document.getElementById('queueEmpty');
     const actions = document.getElementById('queueActions');
     const statsEl = document.getElementById('queueStats');
+    const loadMoreBtn = document.getElementById('queueLoadMore');
+
+    if (append) {
+        _queueDesiredCount = Infinity;
+    } else if (preserveLoadedCount) {
+        _queueDesiredCount = _queueHasMore ? Math.max(QUEUE_PAGE_SIZE, _queueArticles.length) : Infinity;
+        _queueSelectedIds = new Set();
+    } else {
+        _queueDesiredCount = QUEUE_PAGE_SIZE;
+        _queueOffset = 0;
+        _queueArticles = [];
+        _queueSelectedIds = new Set();
+    }
 
     try {
-        const data = await fetchJSON('/api/control/pending');
-        const articles = data.articles || [];
-        const stats = data.stats || {};
+        let articles = append ? _queueArticles.slice() : [];
+        let stats = {};
+        let total = 0;
+        let hasMore = false;
+
+        while (true) {
+            const remaining = _queueDesiredCount === Infinity
+                ? QUEUE_FETCH_LIMIT
+                : Math.max(0, _queueDesiredCount - articles.length);
+            if (_queueDesiredCount !== Infinity && remaining === 0) break;
+
+            const limit = _queueDesiredCount === Infinity
+                ? QUEUE_FETCH_LIMIT
+                : Math.min(QUEUE_FETCH_LIMIT, remaining);
+            const data = await fetchJSON(`/api/control/pending?limit=${limit}&offset=${articles.length}`);
+            const batch = data.articles || [];
+
+            stats = data.stats || {};
+            total = data.total || 0;
+            hasMore = !!data.has_more;
+
+            if (!batch.length) break;
+            articles = articles.concat(batch);
+
+            if (!hasMore) break;
+            if (_queueDesiredCount !== Infinity && articles.length >= Math.min(_queueDesiredCount, total)) break;
+        }
+
+        _queueTotal = total;
+        _queueHasMore = hasMore && articles.length < total;
 
         // Stats summary
         const statParts = [];
         if (stats.rss) statParts.push(`${stats.rss} RSS`);
         if (stats.websearch) statParts.push(`${stats.websearch} Web`);
         if (stats.manual) statParts.push(`${stats.manual} Manual`);
+        if (articles.length < _queueTotal) {
+            statParts.push(`showing ${articles.length} of ${_queueTotal}`);
+        }
         statsEl.textContent = statParts.length ? `(${statParts.join(' \u00B7 ')})` : '';
 
-        if (articles.length === 0) {
+        if (_queueTotal === 0) {
             table.style.display = 'none';
             actions.style.display = 'none';
+            if (loadMoreBtn) loadMoreBtn.style.display = 'none';
             empty.style.display = 'block';
             return;
         }
@@ -1902,28 +1983,46 @@ async function renderReviewQueue() {
         actions.style.display = '';
         empty.style.display = 'none';
 
-        document.getElementById('queueTotal').textContent = articles.length;
-        document.getElementById('queueSelectAll').checked = false;
+        document.getElementById('queueTotal').textContent = _queueTotal;
+        if (!append) document.getElementById('queueSelectAll').checked = false;
 
         _queueArticles = articles;
+        if (!append && !preserveLoadedCount && _queueSelectedIds.size === 0) {
+            _queueArticles.forEach(a => {
+                if (a.relevance_score !== null && a.relevance_score !== undefined && a.relevance_score >= 7) {
+                    _queueSelectedIds.add(a.id);
+                }
+            });
+        }
+        _queueOffset = _queueArticles.length;
         sortQueueArticles();
         renderQueueRows();
         updateQueueSortIndicators();
+        if (loadMoreBtn) loadMoreBtn.style.display = _queueHasMore ? '' : 'none';
     } catch (err) { console.error('Review queue error:', err); }
 }
 
 function toggleAllQueue(checked) {
-    document.querySelectorAll('.queue-check').forEach(cb => { cb.checked = checked; });
+    document.querySelectorAll('.queue-check').forEach(cb => {
+        cb.checked = checked;
+        onQueueCheckChanged(cb, false);
+    });
     updateQueueSelectedCount();
 }
 
 function updateQueueSelectedCount() {
-    const checked = document.querySelectorAll('.queue-check:checked').length;
-    document.getElementById('queueSelected').textContent = checked;
+    document.getElementById('queueSelected').textContent = _queueSelectedIds.size;
+}
+
+function onQueueCheckChanged(cb, syncCount = true) {
+    const id = parseInt(cb.dataset.id);
+    if (cb.checked) _queueSelectedIds.add(id);
+    else _queueSelectedIds.delete(id);
+    if (syncCount) updateQueueSelectedCount();
 }
 
 async function approveQueueSelected() {
-    const ids = Array.from(document.querySelectorAll('.queue-check:checked')).map(cb => parseInt(cb.dataset.id));
+    const ids = Array.from(_queueSelectedIds);
     if (ids.length === 0) return;
     const status = document.getElementById('queueStatus');
     try {
@@ -1934,13 +2033,14 @@ async function approveQueueSelected() {
         const data = await resp.json();
         if (data.success) {
             status.innerHTML = `<span class="task-complete">Approved ${data.approved} article${data.approved !== 1 ? 's' : ''}</span>`;
-            await renderReviewQueue();
+            _queueSelectedIds.clear();
+            await renderReviewQueue({ preserveLoadedCount: true });
         }
     } catch (err) { console.error('Approve error:', err); }
 }
 
 async function rejectQueueSelected() {
-    const ids = Array.from(document.querySelectorAll('.queue-check:checked')).map(cb => parseInt(cb.dataset.id));
+    const ids = Array.from(_queueSelectedIds);
     if (ids.length === 0) return;
     const status = document.getElementById('queueStatus');
     try {
@@ -1949,7 +2049,8 @@ async function rejectQueueSelected() {
             body: JSON.stringify({ article_ids: ids }),
         });
         status.innerHTML = `<span class="task-complete">Rejected ${ids.length} article${ids.length !== 1 ? 's' : ''}</span>`;
-        await renderReviewQueue();
+        _queueSelectedIds.clear();
+        await renderReviewQueue({ preserveLoadedCount: true });
     } catch (err) { console.error('Reject error:', err); }
 }
 
@@ -1983,33 +2084,50 @@ function queueSelectFiltered(filter) {
             case 'type-websearch': cb.checked = (article.source_type === 'websearch'); break;
             default: break;
         }
+        onQueueCheckChanged(cb, false);
     });
     document.getElementById('queueSelectAll').checked =
         document.querySelectorAll('.queue-check').length === document.querySelectorAll('.queue-check:checked').length;
     updateQueueSelectedCount();
 }
 
-async function renderAnalysisQueue() {
+async function renderAnalysisQueue(append = false) {
     const table = document.getElementById('analysisTable');
     const tbody = document.getElementById('analysisBody');
     const empty = document.getElementById('analysisEmpty');
     const countEl = document.getElementById('analysisCount');
+    const loadMoreBtn = document.getElementById('analysisLoadMore');
+    const limit = 200;
+
+    if (!append) {
+        _analysisOffset = 0;
+    }
 
     try {
-        const data = await fetchJSON('/api/control/unanalyzed');
+        const data = await fetchJSON(`/api/control/unanalyzed?limit=${limit}&offset=${_analysisOffset}`);
         const articles = data.articles || [];
+        _analysisTotal = data.total || 0;
+        _analysisHasMore = !!data.has_more;
+        const loadedCount = append ? (_analysisOffset + articles.length) : articles.length;
 
-        countEl.textContent = articles.length > 0 ? `(${articles.length})` : '';
+        if (_analysisTotal > 0) {
+            countEl.textContent = loadedCount < _analysisTotal
+                ? `(${loadedCount} of ${_analysisTotal})`
+                : `(${_analysisTotal})`;
+        } else {
+            countEl.textContent = '';
+        }
 
-        if (articles.length === 0) {
+        if (_analysisTotal === 0) {
             table.style.display = 'none';
+            if (loadMoreBtn) loadMoreBtn.style.display = 'none';
             empty.style.display = 'block';
             return;
         }
         table.style.display = '';
         empty.style.display = 'none';
 
-        tbody.innerHTML = articles.map(a => {
+        const rows = articles.map(a => {
             const titleTrunc = a.title && a.title.length > 65 ? a.title.substring(0, 62) + '...' : (a.title || '--');
             const stateAbbr = getStateAbbr(a.state);
             return `<tr>
@@ -2019,7 +2137,19 @@ async function renderAnalysisQueue() {
                 <td>${stateAbbr ? `<span class="pill pill-state">${stateAbbr}</span>` : '--'}</td>
             </tr>`;
         }).join('');
+        if (append) tbody.innerHTML += rows;
+        else tbody.innerHTML = rows;
+        _analysisOffset = loadedCount;
+        if (loadMoreBtn) loadMoreBtn.style.display = _analysisHasMore ? '' : 'none';
     } catch (err) { console.error('Analysis queue error:', err); }
+}
+
+function loadMoreQueue() {
+    renderReviewQueue({ append: true });
+}
+
+function loadMoreAnalysis() {
+    renderAnalysisQueue(true);
 }
 
 async function renderControl() {
@@ -2046,7 +2176,7 @@ async function renderControl() {
                                t.status === 'error' ? 'ERR' : 'RUN';
             let dur = '--';
             if (t.started && t.finished) {
-                const ms = new Date(t.finished) - new Date(t.started);
+                const ms = parseIsoDate(t.finished) - parseIsoDate(t.started);
                 dur = ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(1) + 's';
             } else if (t.status === 'running') {
                 dur = 'running...';
@@ -2074,12 +2204,28 @@ function formatTaskResult(type, result) {
         case 'websearch':
             return `Found: ${result.total_results || 0} | New: ${result.new_articles || 0} | URL dupes: ${result.skipped_url || 0} | Title dupes: ${result.skipped_title || 0}`;
         case 'analysis':
-            return `Analyzed: ${result.analyzed || 0} | Errors: ${result.errors || 0}`;
+            return `Analyzed: ${result.analyzed || 0} | Errors: ${result.errors || 0}${result.scrape_scraped ? ` | Scraped: ${result.scrape_scraped}` : ''}`;
         case 'digest':
             return result.filename || result.message || 'Done';
         default:
             return JSON.stringify(result).substring(0, 80);
     }
+}
+
+function formatAnalysisProgress(progress, elapsed) {
+    if (!progress || !progress.phase) return `Running... (${elapsed})`;
+
+    if (progress.phase === 'scraping') {
+        if (progress.total !== undefined) return `Scraping full text ${progress.current || 0} / ${progress.total}... (${elapsed})`;
+        return `Scraping full text... (${elapsed})`;
+    }
+    if (progress.phase === 'preparing') return `Preparing analysis batch... (${elapsed})`;
+    if (progress.phase === 'analyzing') {
+        if (progress.total !== undefined) return `Analyzing ${progress.current || 0} / ${progress.total}... (${elapsed})`;
+        return `Analyzing... (${elapsed})`;
+    }
+    if (progress.phase === 'starting') return `Starting analysis... (${elapsed})`;
+    return `Running... (${elapsed})`;
 }
 
 async function submitArticle(e) {
@@ -2174,25 +2320,25 @@ async function runTask(type) {
 function pollTask(taskId, type, btnId, statusId) {
     const btn = document.getElementById(btnId);
     const status = document.getElementById(statusId);
-    let elapsed = 0;
+    _pollFailures[type] = 0;
 
     // Clear any existing poll for this type
     if (_pollTimers[type]) clearInterval(_pollTimers[type]);
 
     _pollTimers[type] = setInterval(async () => {
-        elapsed += 2;
         try {
             const data = await fetchJSON(`/api/control/task/${taskId}`);
+            _pollFailures[type] = 0;
 
             if (data.status === 'running') {
-                let msg = `Running... (${elapsed}s)`;
-                if (data.progress && data.progress.total) {
-                    msg = `Analyzing ${data.progress.current} / ${data.progress.total}... (${elapsed}s)`;
-                }
+                const elapsed = formatElapsedSeconds(elapsedSecondsFromIso(data.started));
+                let msg = `Running... (${elapsed})`;
+                if (type === 'analysis') msg = formatAnalysisProgress(data.progress || {}, elapsed);
                 status.innerHTML = `<span class="task-running">${msg}</span>`;
             } else if (data.status === 'completed') {
                 clearInterval(_pollTimers[type]);
                 _pollTimers[type] = null;
+                _pollFailures[type] = 0;
                 const resultText = formatTaskResult(type, data.result);
                 status.innerHTML = `<span class="task-complete">${escapeHtml(resultText)}</span>`;
                 btn.disabled = false;
@@ -2201,11 +2347,17 @@ function pollTask(taskId, type, btnId, statusId) {
             } else if (data.status === 'error') {
                 clearInterval(_pollTimers[type]);
                 _pollTimers[type] = null;
+                _pollFailures[type] = 0;
                 status.innerHTML = `<span class="task-error">Error: ${escapeHtml(data.error || 'Unknown')}</span>`;
                 btn.disabled = false;
                 btn.classList.remove('running');
             }
         } catch (err) {
+            _pollFailures[type] = (_pollFailures[type] || 0) + 1;
+            if (_pollFailures[type] < 4) {
+                status.innerHTML = `<span class="task-running">Connection hiccup, retrying...</span>`;
+                return;
+            }
             clearInterval(_pollTimers[type]);
             _pollTimers[type] = null;
             status.innerHTML = `<span class="task-error">Poll error: ${escapeHtml(err.message)}</span>`;
@@ -2255,17 +2407,24 @@ async function runWebSearch() {
 function pollWebSearch(taskId) {
     const btn = document.getElementById('btnWebsearch');
     const status = document.getElementById('statusWebsearch');
-    let elapsed = 0;
 
     if (_pollTimers.websearch) clearInterval(_pollTimers.websearch);
 
     _pollTimers.websearch = setInterval(async () => {
-        elapsed += 2;
         try {
             const data = await fetchJSON(`/api/control/task/${taskId}`);
 
             if (data.status === 'running') {
-                status.innerHTML = `<span class="task-running">Searching & scoring... (${elapsed}s)</span>`;
+                const elapsed = formatElapsedSeconds(elapsedSecondsFromIso(data.started));
+                const progress = data.progress || {};
+                let msg = 'Searching & scoring...';
+                if (progress.phase === 'querying' && progress.total) {
+                    msg = `Searching ${progress.current}/${progress.total}`;
+                    if (progress.state) msg += ` (${progress.state})`;
+                } else if (progress.phase === 'scoring' && progress.total) {
+                    msg = `Scoring ${Math.min(progress.current, progress.total)}/${progress.total}`;
+                }
+                status.innerHTML = `<span class="task-running">${msg} (${elapsed})</span>`;
             } else if (data.status === 'completed') {
                 clearInterval(_pollTimers.websearch);
                 _pollTimers.websearch = null;
@@ -2347,20 +2506,29 @@ async function runStateSweep() {
 function pollStateSweep(taskId) {
     const btn = document.getElementById('btnSweep');
     const status = document.getElementById('statusSweep');
-    let elapsed = 0;
 
     if (_pollTimers.sweep) clearInterval(_pollTimers.sweep);
 
     _pollTimers.sweep = setInterval(async () => {
-        elapsed += 3;
         try {
             const data = await fetchJSON(`/api/control/task/${taskId}`);
 
             if (data.status === 'running') {
-                const mins = Math.floor(elapsed / 60);
-                const secs = elapsed % 60;
-                const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-                status.innerHTML = `<span class="task-running">Sweeping states... (${timeStr})</span>`;
+                const elapsed = formatElapsedSeconds(elapsedSecondsFromIso(data.started));
+                const progress = data.progress || {};
+                let msg = 'Sweeping states...';
+
+                if (progress.phase === 'querying' && progress.total) {
+                    msg = `Querying ${progress.current}/${progress.total}`;
+                    if (progress.state) msg += ` (${progress.state})`;
+                } else if (progress.phase === 'scoring' && progress.total) {
+                    msg = `Scoring ${Math.min(progress.current, progress.total)}/${progress.total}`;
+                    if (progress.state) msg += ` (${progress.state})`;
+                } else if (progress.phase === 'analyzing') {
+                    msg = 'Running post-sweep analysis';
+                }
+
+                status.innerHTML = `<span class="task-running">${msg} (${elapsed})</span>`;
             } else if (data.status === 'completed') {
                 clearInterval(_pollTimers.sweep);
                 _pollTimers.sweep = null;

@@ -101,15 +101,14 @@ def compute_stats(articles, conn=None, tracked_states=None):
 
     # WSI scores (if connection available)
     if conn is not None:
-        overall_wsi = sentiment_index.compute_wsi(conn)
-        stats["wsi_overall"] = overall_wsi.get("current_wsi")
+        overall_bundle = sentiment_index.compute_wsi_bundle(conn)
+        stats["wsi_overall"] = overall_bundle.get("current_wsi")
         stats["wsi_by_state"] = {}
         for state in tracked_states:
-            state_wsi = sentiment_index.compute_wsi(conn, state=state)
-            stats["wsi_by_state"][state] = state_wsi.get("current_wsi")
+            state_bundle = sentiment_index.compute_wsi_bundle(conn, state=state)
+            stats["wsi_by_state"][state] = state_bundle.get("current_wsi")
 
-        comparison = sentiment_index.compute_period_comparison(conn)
-        stats["period_comparison"] = comparison
+        stats["period_comparison"] = overall_bundle.get("period_comparison")
 
     return stats
 

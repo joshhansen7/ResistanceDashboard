@@ -252,14 +252,16 @@ def _score_relevance(client, model, article):
     return 5, "Scoring error"
 
 
-def score_relevance_hybrid(article, client=None, model=None):
+def score_relevance_hybrid(article, client=None, model=None, local_ready=None):
     """
     Score relevance using local LLM first, falling back to Claude API.
     Returns (score, reason) tuple.
     """
     try:
         import local_llm
-        if local_llm.ensure_running():
+        if local_ready is None:
+            local_ready = local_llm.ensure_running()
+        if local_ready:
             score, reason = local_llm.score_relevance(
                 article.get("title", ""),
                 article.get("summary", ""),
@@ -296,6 +298,23 @@ def ingest_feeds(config=None, state=None):
                                         config.get("anthropic", {}).get("classification_model",
                                                                          "claude-haiku-4-5-20251001"))
         client = get_anthropic_client()
+        try:
+            import local_llm
+            local_ready = local_llm.ensure_running()
+        except Exception as e:
+            logger.debug("Local LLM unavailable: %s", e)
+            local_ready = False
+
+        existing_urls = {
+            r["url"] for r in conn.execute(
+                "SELECT url FROM articles WHERE url IS NOT NULL AND url != ''"
+            ).fetchall()
+        }
+        existing_urls.update(
+            r["url"] for r in conn.execute(
+                "SELECT url FROM pending_articles WHERE status = 'pending' AND url IS NOT NULL AND url != ''"
+            ).fetchall()
+        )
 
         # Collect feeds from per-state configs
         all_feeds = []
@@ -378,16 +397,7 @@ def ingest_feeds(config=None, state=None):
                             continue
 
                         # Dedup: skip if URL already in articles or pending
-                        existing = conn.execute(
-                            "SELECT id FROM articles WHERE url = ?", (link,)
-                        ).fetchone()
-                        if existing:
-                            continue
-                        existing_pending = conn.execute(
-                            "SELECT id FROM pending_articles WHERE url = ? AND status = 'pending'",
-                            (link,),
-                        ).fetchone()
-                        if existing_pending:
+                        if link in existing_urls:
                             continue
 
                         # Score relevance (local LLM first, Claude fallback)
@@ -396,9 +406,9 @@ def ingest_feeds(config=None, state=None):
                             "published_date": pub_date, "summary": summary,
                         }
                         rel_score, rel_reason = score_relevance_hybrid(
-                            article_for_scoring, client, relevance_model,
+                            article_for_scoring, client, relevance_model, local_ready=local_ready,
                         )
-                        if rel_score is not None:
+                        if rel_score is not None and not local_ready:
                             time.sleep(0.1)  # Brief pause (local LLM is fast)
 
                         # Auto-approve if above threshold
@@ -418,6 +428,7 @@ def ingest_feeds(config=None, state=None):
                             }
                             result = db.insert_article(conn, article_data)
                             if result is not None:
+                                existing_urls.add(link.strip())
                                 total_auto_approved += 1
                                 total_new += 1
                                 logger.info("Auto-approved: [%s] %s (rel=%d)", name, title[:60], rel_score)
@@ -446,6 +457,7 @@ def ingest_feeds(config=None, state=None):
                             "state": final_state,
                         }
                         db.insert_pending_article(conn, pending_data)
+                        existing_urls.add(link.strip())
                         total_new += 1
                         logger.info("Queued: [%s] %s (rel=%s)", name, title[:60], rel_score)
 

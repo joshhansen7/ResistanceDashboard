@@ -20695,6 +20695,10 @@
     "county": "Antrim County",
     "fips": "26009"
   },
+  "central ohio township, ohio": {
+    "county": "Ottawa County",
+    "fips": "39123"
+  },
   "central point, oregon": {
     "county": "Jackson County",
     "fips": "41029"
@@ -31999,6 +32003,10 @@
     "county": "Delta County",
     "fips": "26041"
   },
+  "delta, mississippi": {
+    "county": "Coahoma County",
+    "fips": "28027"
+  },
   "delta, missouri": {
     "county": "Cape Girardeau County",
     "fips": "29031"
@@ -33955,6 +33963,10 @@
     "county": "Barry County",
     "fips": "26015"
   },
+  "down east, maine": {
+    "county": "Cumberland County",
+    "fips": "23005"
+  },
   "downers grove, illinois": {
     "county": "DuPage County",
     "fips": "17043"
@@ -34574,6 +34586,10 @@
   "duluth, georgia": {
     "county": "Gwinnett County",
     "fips": "13135"
+  },
+  "duluth, minnesota": {
+    "county": "St. Louis County",
+    "fips": "27137"
   },
   "dulzura, california": {
     "county": "San Diego County",
@@ -37406,6 +37422,10 @@
   "eldorado springs, colorado": {
     "county": "Boulder County",
     "fips": "08013"
+  },
+  "eldorado valley, nevada": {
+    "county": "Clark County",
+    "fips": "32003"
   },
   "eldorado, illinois": {
     "county": "Saline County",
@@ -67275,6 +67295,10 @@
     "county": "Hancock County",
     "fips": "28045"
   },
+  "lakeside city, texas": {
+    "county": "Archer County",
+    "fips": "48009"
+  },
   "lakeside marblehead, ohio": {
     "county": "Ottawa County",
     "fips": "39123"
@@ -75270,6 +75294,10 @@
   "manhattan, nevada": {
     "county": "Nye County",
     "fips": "32023"
+  },
+  "manhattan, new york": {
+    "county": "New York County",
+    "fips": "36061"
   },
   "manheim, pennsylvania": {
     "county": "Lancaster County",
@@ -90067,6 +90095,10 @@
     "county": "Plymouth County",
     "fips": "25023"
   },
+  "north penn, pennsylvania": {
+    "county": "Montgomery County",
+    "fips": "42091"
+  },
   "north pitcher, new york": {
     "county": "Chenango County",
     "fips": "36017"
@@ -90490,6 +90522,10 @@
   "northvale, new jersey": {
     "county": "Bergen County",
     "fips": "34003"
+  },
+  "northville township, michigan": {
+    "county": "Wayne County",
+    "fips": "26163"
   },
   "northville, michigan": {
     "county": "Wayne County",
@@ -96907,9 +96943,17 @@
     "county": "Cecil County",
     "fips": "24015"
   },
+  "perry township, michigan": {
+    "county": "Shiawassee County",
+    "fips": "26155"
+  },
   "perry township, ohio": {
     "county": "Licking County",
     "fips": "39089"
+  },
+  "perry village, ohio": {
+    "county": "Lake County",
+    "fips": "39085"
   },
   "perry, alabama": {
     "county": "Perry County",
@@ -99410,6 +99454,10 @@
   "plymouth meeting, pennsylvania": {
     "county": "Montgomery County",
     "fips": "42091"
+  },
+  "plymouth township, michigan": {
+    "county": "Wayne County",
+    "fips": "26163"
   },
   "plymouth, california": {
     "county": "Amador County",
@@ -106435,6 +106483,10 @@
     "county": "Rock County",
     "fips": "31149"
   },
+  "rock, oklahoma": {
+    "county": "Comanche County",
+    "fips": "40031"
+  },
   "rock, west virginia": {
     "county": "Mercer County",
     "fips": "54055"
@@ -113347,6 +113399,10 @@
     "county": "Monroe County",
     "fips": "42089"
   },
+  "shawnee township, pennsylvania": {
+    "county": "Mifflin County",
+    "fips": "42087"
+  },
   "shawnee, colorado": {
     "county": "Park County",
     "fips": "08093"
@@ -113422,6 +113478,10 @@
   "sheffield, massachusetts": {
     "county": "Berkshire County",
     "fips": "25003"
+  },
+  "sheffield, ohio": {
+    "county": "Lorain County",
+    "fips": "39093"
   },
   "sheffield, pennsylvania": {
     "county": "Warren County",
@@ -115299,6 +115359,10 @@
     "county": "Smith County",
     "fips": "48423"
   },
+  "smith hill, rhode island": {
+    "county": "Providence County",
+    "fips": "44007"
+  },
   "smith lake, new mexico": {
     "county": "McKinley County",
     "fips": "35031"
@@ -116818,6 +116882,10 @@
   "southeast michigan, detroit, michigan": {
     "county": "Wayne County",
     "fips": "26163"
+  },
+  "southeastern wisconsin, wisconsin": {
+    "county": "Milwaukee County",
+    "fips": "55079"
   },
   "southeastern, pennsylvania": {
     "county": "Chester County",
@@ -133114,6 +133182,10 @@
   "west stockbridge, massachusetts": {
     "county": "Berkshire County",
     "fips": "25003"
+  },
+  "west suburbs, illinois": {
+    "county": "Cook County",
+    "fips": "17031"
   },
   "west suffield, connecticut": {
     "county": "Hartford County",

@@ -98,23 +98,21 @@ def _get_state_locations(conn):
 
 def _get_wsi(conn):
     """Get WSI data for the report."""
-    wsi = sentiment_index.compute_wsi(conn)
-    comparison = sentiment_index.compute_period_comparison(conn)
+    bundle = sentiment_index.compute_wsi_bundle(conn)
     state_wsi = {}
     for state in _get_tracked_states(conn):
-        sw = sentiment_index.compute_wsi(conn, state=state)
-        state_wsi[state] = sw.get("current_wsi")
+        state_wsi[state] = sentiment_index.compute_wsi_bundle(conn, state=state).get("current_wsi")
     return {
-        "current_wsi": wsi.get("current_wsi"),
-        "raw_avg": wsi.get("raw_avg"),
-        "period_comparison": comparison,
+        "current_wsi": bundle.get("current_wsi"),
+        "raw_avg": bundle.get("raw_avg"),
+        "period_comparison": bundle.get("period_comparison"),
         "by_state": state_wsi,
     }
 
 
 def _get_trend(conn):
     """Get weekly WSI trend for the report."""
-    trend = sentiment_index.compute_wsi_trend(conn)
+    trend = sentiment_index.compute_wsi_bundle(conn).get("trend", [])
     return [
         {"week": t["week"], "wsi": t["wsi"], "raw": t["raw"],
          "articles": t["articles"], "clusters": t["clusters"], "carried": t["carried"]}
