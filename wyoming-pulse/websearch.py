@@ -435,22 +435,23 @@ def run_websearch(query=None, days_back=30, state=None,
 
                 # Auto-approve if above threshold
                 if auto_threshold and rel_score >= auto_threshold:
+                    original_url = article["url"]
                     final_url = _resolve_article_url(article, resolved_url_cache, existing_urls)
                     if not final_url:
                         continue
-                    article["url"] = final_url
                     article_data = {
                         "source": article["source"],
                         "source_type": "websearch",
                         "title": article["title"],
-                        "url": article["url"],
+                        "url": original_url,
                         "published_date": article["published_date"],
-                        "full_text": article["summary"],
+                        "full_text": None,
                         "summary": article["summary"],
                         "matched_keywords": article["matched_keywords"],
                         "keyword_score": article["keyword_score"],
                         "state": article["state"],
                         "location_relevance": article["location_relevance"],
+                        "resolved_url": final_url if final_url != original_url else None,
                     }
                     result = db.insert_article(conn, article_data)
                     if result is not None:

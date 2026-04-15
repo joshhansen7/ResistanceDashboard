@@ -236,7 +236,7 @@
                     <option value="nationwide">Nationwide</option>
                 </select>
                 <select id="filterLocation" onchange="renderArticles()">
-                    <option value="">All Regions</option>
+                    <option value="">All Counties / General</option>
                 </select>
                 <select id="filterSentiment" onchange="renderArticles()">
                     <option value="">All Sentiments</option>
@@ -404,6 +404,20 @@
                     </select>
                     <button class="btn-action" id="btnRunAnalysis" onclick="runTask('analysis')">Run Analysis</button>
                     <div class="task-status" id="statusAnalysis"></div>
+                </div>
+            </div>
+
+            <div class="control-section">
+                <div class="sh">Low-Confidence Upgrade</div>
+                <p class="control-desc">Resolve and rescrape recent analyzed thin Google News wrapper rows from the last 30 days, then reanalyze only the rows that materially improve.</p>
+                <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+                    <select id="reprocessBatchSize" style="padding:4px 6px;background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);font-family:var(--font-data);font-size:11px">
+                        <option value="100">100 rows</option>
+                        <option value="250" selected>250 rows</option>
+                        <option value="500">500 rows</option>
+                    </select>
+                    <button class="btn-action" id="btnReprocessLowConfidence" onclick="runTask('reprocess')">Upgrade Recent</button>
+                    <div class="task-status" id="statusReprocess"></div>
                 </div>
             </div>
 

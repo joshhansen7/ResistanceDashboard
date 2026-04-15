@@ -83,7 +83,7 @@ def build_user_message(article):
 
 def parse_analysis_response(response_text):
     """Parse the JSON response from Claude, handling edge cases."""
-    from geo import normalize_locations, normalize_state_key
+    from geo import derive_article_scope, normalize_locations, normalize_state_key
 
     result = parse_json_response(response_text)
     if result is None:
@@ -116,11 +116,8 @@ def parse_analysis_response(response_text):
         # Normalize FIPS
         normalize_locations(locations)
         result["locations_json"] = locations
-        # Set backward-compat fields from first primary (or first) location
-        primary = next((l for l in locations if l.get("relevance") == "primary"), locations[0])
-        result["state"] = primary.get("state", "other")
-        place = primary.get("place") or primary.get("town")
-        result["location_relevance"] = place if place else "statewide"
+        # Set backward-compat fields from normalized primary location
+        result["state"], result["location_relevance"] = derive_article_scope(locations)
     elif "state" in result:
         # Old single-location format — wrap into locations array
         state = result.get("state", "other")
@@ -131,6 +128,7 @@ def parse_analysis_response(response_text):
         locations = [entry]
         normalize_locations(locations)
         result["locations_json"] = locations
+        result["state"], result["location_relevance"] = derive_article_scope(locations)
     else:
         # No location data — default to nationwide (factors into national
         # averages but not any specific state).
@@ -167,12 +165,24 @@ def parse_analysis_response(response_text):
     return result
 
 
-def analyze_articles(config=None, limit=None, progress_callback=None):
+def analyze_articles(
+    config=None,
+    limit=None,
+    progress_callback=None,
+    article_ids=None,
+    include_analyzed=False,
+    skip_scrape=False,
+):
     """
-    Analyze a selected batch of unanalyzed articles using Claude API.
-    The batch is selected first, then any thin articles within that batch are scraped,
-    and finally that same batch is analyzed. This keeps behavior identical across
-    all batch sizes.
+    Analyze a selected batch of articles using Claude API.
+
+    Normal mode keeps the existing behavior intact:
+      1. select the unanalyzed batch first
+      2. scrape thin rows only inside that batch
+      3. analyze that same batch
+
+    Targeted mode (article_ids provided) reuses the same analyzer for bounded
+    reprocessing without disturbing the default batch flow.
 
     If progress_callback is provided, it is called with a dict payload such as:
       {"phase": "preparing" | "scraping" | "analyzing", "current": n, "total": m}
@@ -214,27 +224,42 @@ def analyze_articles(config=None, limit=None, progress_callback=None):
 
     conn = db.get_connection()
     try:
-        batch = db.get_unanalyzed_articles(conn, limit=limit)
+        if article_ids:
+            batch = db.get_articles_by_ids(
+                conn,
+                article_ids,
+                analyzed_only=include_analyzed,
+            )
+        else:
+            batch = db.get_unanalyzed_articles(conn, limit=limit)
 
         if not batch:
-            logger.info("No unanalyzed articles found.")
+            logger.info("No articles found for analysis.")
             return {"analyzed": 0, "skipped": 0, "errors": 0}
 
         batch_ids = [row["id"] for row in batch]
         emit_progress({"phase": "preparing", "current": 0, "total": len(batch_ids)})
 
-        import scraper
-        scrape_result = scraper.scrape_thin_articles(
-            conn,
-            article_ids=batch_ids,
-            progress_callback=lambda current, total: emit_progress({
-                "phase": "scraping",
-                "current": current,
-                "total": total,
-            }),
-        )
+        scrape_result = {"scraped": 0, "failed": 0, "skipped": 0}
+        if not skip_scrape:
+            import scraper
 
-        articles = db.get_articles_by_ids(conn, batch_ids, unanalyzed_only=True)
+            scrape_result = scraper.scrape_thin_articles(
+                conn,
+                article_ids=batch_ids,
+                progress_callback=lambda current, total: emit_progress({
+                    "phase": "scraping",
+                    "current": current,
+                    "total": total,
+                }),
+            )
+
+        articles = db.get_articles_by_ids(
+            conn,
+            batch_ids,
+            unanalyzed_only=not include_analyzed,
+            analyzed_only=include_analyzed,
+        )
 
         if not articles:
             logger.info("Selected batch no longer has unanalyzed articles.")

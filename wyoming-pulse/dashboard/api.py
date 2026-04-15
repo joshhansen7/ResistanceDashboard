@@ -120,6 +120,86 @@ def _safe_json_loads(value, default):
         return default
 
 
+def _bool_arg(name, default=False):
+    """Parse a truthy/falsy query arg with a stable default."""
+    raw = request.args.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _humanize_location_label(value):
+    """Render legacy location labels consistently when we need a fallback."""
+    if not value:
+        return "General"
+    label = str(value).replace("_", " ").strip()
+    lower = label.lower()
+    if lower == "statewide":
+        return "General"
+    if lower == "nationwide":
+        return "Nationwide"
+    return label.title() if label == lower else label
+
+
+def _article_payload(row, *, state_relevance=None):
+    """Serialize an article row consistently across list/detail endpoints."""
+    locations = _safe_json_loads(row["locations_json"], []) if "locations_json" in row.keys() else []
+    primary = geo.get_primary_location(locations)
+    raw_primary_place = None
+    primary_county_fips = None
+    primary_county_name = None
+    geography_scope = "statewide"
+    if primary:
+        raw_primary_place = primary.get("source_place") or primary.get("raw_place") or primary.get("place") or primary.get("town") or primary.get("county")
+        primary_county_fips = primary.get("county_fips")
+        primary_county_name = primary.get("county_name")
+        primary_state = geo.normalize_state_key(primary.get("state"))
+        if primary_state == "nationwide":
+            geography_scope = "nationwide"
+        elif primary_county_fips and primary_county_name:
+            geography_scope = "county"
+    location_display = geo.derive_location_display(
+        locations,
+        fallback_state=row["state"] if "state" in row.keys() else None,
+        fallback_location=row["location_relevance"] if "location_relevance" in row.keys() else None,
+    )
+    if not locations:
+        location_display = _humanize_location_label(location_display)
+
+    payload = {
+        "id": row["id"],
+        "title": row["title"],
+        "source": row["source"],
+        "source_type": row["source_type"],
+        "published_date": row["published_date"],
+        "sentiment_score": row["sentiment_score"] if "sentiment_score" in row.keys() else None,
+        "sentiment_label": row["sentiment_label"] if "sentiment_label" in row.keys() else None,
+        "voice_type": row["voice_type"] if "voice_type" in row.keys() else None,
+        "state": row["state"] if "state" in row.keys() else None,
+        "location_relevance": row["location_relevance"] if "location_relevance" in row.keys() else None,
+        "location_display": location_display,
+        "raw_primary_place": raw_primary_place,
+        "primary_county_fips": primary_county_fips,
+        "primary_county_name": primary_county_name,
+        "geography_scope": geography_scope,
+        "url": row["url"],
+        "resolved_url": row["resolved_url"] if "resolved_url" in row.keys() else None,
+        "key_claims": row["key_claims"] if "key_claims" in row.keys() else None,
+        "sentiment_justification": row["sentiment_justification"] if "sentiment_justification" in row.keys() else None,
+        "topic_tags": _safe_json_loads(row["topic_tags"], []) if "topic_tags" in row.keys() else [],
+        "entities_mentioned": _safe_json_loads(row["entities_mentioned"], []) if "entities_mentioned" in row.keys() else [],
+        "summary": row["summary"] if "summary" in row.keys() else None,
+        "content_quality": row["content_quality"] if "content_quality" in row.keys() else None,
+        "scrape_status": row["scrape_status"] if "scrape_status" in row.keys() else None,
+        "scrape_attempts": row["scrape_attempts"] if "scrape_attempts" in row.keys() else None,
+        "last_scrape_at": row["last_scrape_at"] if "last_scrape_at" in row.keys() else None,
+        "is_low_confidence": db.is_low_confidence_article(row),
+    }
+    if state_relevance:
+        payload["state_relevance"] = state_relevance
+    return payload
+
+
 def _active_states(conn):
     """Return tracked states with counts and reference data."""
     rows = conn.execute(
@@ -154,7 +234,7 @@ def fips_pair(fips):
 # ──────────────────────────────────────────────
 # /api/overview
 # ──────────────────────────────────────────────
-def _state_filter(include_analyzed=True):
+def _state_filter(include_analyzed=True, exclude_low_confidence=False, article_alias="articles"):
     """Build WHERE clauses and params with optional ?state= and ?county_fips= filters.
 
     Returns (where_sql, params) where where_sql is a composed WHERE clause string.
@@ -166,20 +246,23 @@ def _state_filter(include_analyzed=True):
     clauses = []
     params = []
     if include_analyzed:
-        clauses.append("analyzed = 1")
+        clauses.append(f"{article_alias}.analyzed = 1")
+    if exclude_low_confidence:
+        clauses.append(db.high_confidence_predicate(article_alias))
+        params.extend(db.low_confidence_params())
 
     county_fips = request.args.get("county_fips")
     if county_fips:
         fips_unpadded, fips_padded = fips_pair(county_fips)
         clauses.append(
-            "articles.id IN (SELECT article_id FROM article_states WHERE county_fips IN (?, ?))"
+            f"{article_alias}.id IN (SELECT article_id FROM article_states WHERE county_fips IN (?, ?))"
         )
         params.extend([fips_unpadded, fips_padded])
     else:
         state = request.args.get("state")
         if state:
             clauses.append(
-                "articles.id IN (SELECT article_id FROM article_states WHERE state = ?)"
+                f"{article_alias}.id IN (SELECT article_id FROM article_states WHERE state = ?)"
             )
             params.append(state)
 
@@ -191,11 +274,15 @@ def _state_filter(include_analyzed=True):
 def overview():
     conn = get_conn()
     try:
-        where, params = _state_filter()
-        base_where, _ = _state_filter(include_analyzed=False)  # for total (includes unanalyzed)
+        exclude_low_confidence = not _bool_arg("include_low_confidence", default=False)
+        where, params = _state_filter(exclude_low_confidence=exclude_low_confidence)
+        base_where, base_params = _state_filter(
+            include_analyzed=False,
+            exclude_low_confidence=exclude_low_confidence,
+        )
 
         total = conn.execute(
-            f"SELECT COUNT(*) as c FROM articles WHERE {base_where}", params
+            f"SELECT COUNT(*) as c FROM articles WHERE {base_where}", base_params
         ).fetchone()["c"]
         analyzed = conn.execute(
             f"SELECT COUNT(*) as c FROM articles WHERE {where}", params
@@ -251,6 +338,11 @@ def overview():
             "SELECT analyzed_date FROM articles WHERE analyzed = 1 "
             "ORDER BY analyzed_date DESC LIMIT 1"
         ).fetchone()
+        excluded_where, excluded_params = _state_filter(exclude_low_confidence=False)
+        excluded_low_confidence = conn.execute(
+            f"SELECT COUNT(*) as c FROM articles WHERE {excluded_where} AND {db.low_confidence_predicate('articles')}",
+            excluded_params + db.low_confidence_params(),
+        ).fetchone()["c"]
 
         return jsonify({
             "total_articles": total,
@@ -263,6 +355,7 @@ def overview():
             "sentiment_distribution": sentiment_distribution,
             "last_ingestion": last_ingest["run_date"] if last_ingest else None,
             "last_analysis": last_analysis["analyzed_date"] if last_analysis else None,
+            "excluded_low_confidence": excluded_low_confidence,
         })
     finally:
         conn.close()
@@ -300,6 +393,16 @@ def state_locations():
     return jsonify({"locations": locations})
 
 
+@bp.route("/state-counties")
+def state_counties():
+    """Return all known counties for a state from the local county lookup table."""
+    state = request.args.get("state", "")
+    if not state:
+        return jsonify({"error": "state parameter is required"}), 400
+    counties = geo.get_state_counties(state)
+    return jsonify({"counties": counties})
+
+
 # ──────────────────────────────────────────────
 # /api/sentiment-trend
 # ──────────────────────────────────────────────
@@ -307,7 +410,7 @@ def state_locations():
 def sentiment_trend():
     conn = get_conn()
     try:
-        where, params = _state_filter()
+        where, params = _state_filter(exclude_low_confidence=not _bool_arg("include_low_confidence", default=False))
         rows = conn.execute(
             f"SELECT DATE(published_date) as date, "
             f"AVG(sentiment_score) as avg, COUNT(*) as count "
@@ -341,6 +444,7 @@ def sentiment_index_endpoint():
             state=state,
             county_fips=county_fips,
             weeks_back=weeks_back,
+            include_low_confidence=_bool_arg("include_low_confidence", default=False),
         )
 
         return jsonify({
@@ -360,8 +464,13 @@ def sentiment_index_cards():
     try:
         weeks_back = request.args.get("weeks_back", 26, type=int)
         cards = []
+        include_low_confidence = _bool_arg("include_low_confidence", default=False)
 
-        overall = sentiment_index.compute_wsi_bundle(conn, weeks_back=weeks_back)
+        overall = sentiment_index.compute_wsi_bundle(
+            conn,
+            weeks_back=weeks_back,
+            include_low_confidence=include_low_confidence,
+        )
         cards.append({
             "key": "",
             "name": "All States",
@@ -374,6 +483,7 @@ def sentiment_index_cards():
                 conn,
                 state=state_info["key"],
                 weeks_back=weeks_back,
+                include_low_confidence=include_low_confidence,
             )
             cards.append({
                 "key": state_info["key"],
@@ -405,13 +515,17 @@ def state_sentiment():
     """Per-state average sentiment for the US map."""
     conn = get_conn()
     try:
+        include_low_confidence = _bool_arg("include_low_confidence", default=False)
+        high_conf_where = "" if include_low_confidence else f" AND {db.high_confidence_predicate('a')}"
+        high_conf_params = [] if include_low_confidence else db.low_confidence_params()
         rows = conn.execute(
             "SELECT ast.state, AVG(a.sentiment_score) as avg, "
             "COUNT(DISTINCT ast.article_id) as count "
             "FROM article_states ast "
             "JOIN articles a ON a.id = ast.article_id "
-            "WHERE a.analyzed = 1 AND ast.state IS NOT NULL "
-            "GROUP BY ast.state"
+            f"WHERE a.analyzed = 1 AND ast.state IS NOT NULL{high_conf_where} "
+            "GROUP BY ast.state",
+            high_conf_params,
         ).fetchall()
         result = {}
         for r in rows:
@@ -439,13 +553,18 @@ def locations():
         if not state:
             return jsonify({"error": "state parameter is required"}), 400
 
+        include_low_confidence = _bool_arg("include_low_confidence", default=False)
+        high_conf_where = "" if include_low_confidence else f" AND {db.high_confidence_predicate('a')}"
+        high_conf_params = [] if include_low_confidence else db.low_confidence_params()
+
         # Query via article_states for FIPS-based county grouping
         rows = conn.execute(
             "SELECT ast.county_fips, ast.county_name, a.sentiment_score "
             "FROM article_states ast "
             "JOIN articles a ON a.id = ast.article_id "
-            "WHERE a.analyzed = 1 AND ast.state = ? AND a.sentiment_score IS NOT NULL",
-            (state,),
+            f"WHERE a.analyzed = 1 AND ast.state = ? AND a.sentiment_score IS NOT NULL "
+            f"{high_conf_where}",
+            [state] + high_conf_params,
         ).fetchall()
 
         county_scores = defaultdict(list)  # county_name -> [scores]
@@ -480,7 +599,7 @@ def locations():
 def topics():
     conn = get_conn()
     try:
-        where, params = _state_filter()
+        where, params = _state_filter(exclude_low_confidence=not _bool_arg("include_low_confidence", default=False))
         rows = conn.execute(
             f"SELECT topic_tags, sentiment_score FROM articles WHERE {where}",
             params,
@@ -511,7 +630,7 @@ def topics():
 def entities():
     conn = get_conn()
     try:
-        where, params = _state_filter()
+        where, params = _state_filter(exclude_low_confidence=not _bool_arg("include_low_confidence", default=False))
         rows = conn.execute(
             f"SELECT entities_mentioned, sentiment_score, published_date FROM articles WHERE {where}",
             params,
@@ -562,6 +681,8 @@ def location_weekly():
     try:
         weeks_back = request.args.get("weeks_back", 12, type=int)
         state = request.args.get("state") or None
+        include_low_confidence = _bool_arg("include_low_confidence", default=False)
+        high_conf_where = "" if include_low_confidence else f"AND {db.high_confidence_predicate('a')} "
         sql = (
             "SELECT ast.state as state, ast.county_name as county_name, "
             "a.published_date as published_date, a.sentiment_score as sentiment_score "
@@ -569,8 +690,9 @@ def location_weekly():
             "JOIN articles a ON a.id = ast.article_id "
             "WHERE a.analyzed = 1 AND a.published_date IS NOT NULL "
             "AND ast.state IS NOT NULL "
+            f"{high_conf_where}"
         )
-        params = []
+        params = [] if include_low_confidence else db.low_confidence_params()
         if state:
             sql += "AND ast.state = ? "
             params.append(state)
@@ -639,9 +761,13 @@ def articles():
         state = request.args.get("state", "")
         sentiment = request.args.get("sentiment_label", "")
         relevance = request.args.get("relevance", "")  # "primary" | "mentioned" | ""
+        include_low_confidence = _bool_arg("include_low_confidence", default=True)
 
         where_clauses = ["analyzed = 1"]
         params = []
+        if not include_low_confidence:
+            where_clauses.append(db.high_confidence_predicate("articles"))
+            params.extend(db.low_confidence_params())
 
         rel_filter_sql = ""
         rel_filter_params = []
@@ -677,7 +803,9 @@ def articles():
         rows = conn.execute(
             f"SELECT id, title, source, source_type, published_date, "
             f"sentiment_score, sentiment_label, voice_type, state, location_relevance, "
-            f"url, key_claims, sentiment_justification, topic_tags, entities_mentioned, summary "
+            f"locations_json, "
+            f"url, resolved_url, key_claims, sentiment_justification, topic_tags, entities_mentioned, summary, "
+            f"content_quality, scrape_status, scrape_attempts, last_scrape_at "
             f"FROM articles WHERE {where_sql} "
             f"ORDER BY published_date DESC LIMIT ? OFFSET ?",
             params + [limit, offset],
@@ -710,29 +838,13 @@ def articles():
                     if filter_relevance.get(aid) != "primary":
                         filter_relevance[aid] = rel
 
-        articles_list = []
-        for r in rows:
-            article = {
-                "id": r["id"],
-                "title": r["title"],
-                "source": r["source"],
-                "source_type": r["source_type"],
-                "published_date": r["published_date"],
-                "sentiment_score": r["sentiment_score"],
-                "sentiment_label": r["sentiment_label"],
-                "voice_type": r["voice_type"],
-                "state": r["state"],
-                "location_relevance": r["location_relevance"],
-                "url": r["url"],
-                "key_claims": r["key_claims"],
-                "sentiment_justification": r["sentiment_justification"],
-                "topic_tags": _safe_json_loads(r["topic_tags"], []),
-                "entities_mentioned": _safe_json_loads(r["entities_mentioned"], []),
-                "summary": r["summary"],
-            }
-            if filter_relevance:
-                article["state_relevance"] = filter_relevance.get(r["id"], "primary")
-            articles_list.append(article)
+        articles_list = [
+            _article_payload(
+                r,
+                state_relevance=filter_relevance.get(r["id"], "primary") if filter_relevance else None,
+            )
+            for r in rows
+        ]
 
         return jsonify({
             "articles": articles_list,
@@ -755,7 +867,7 @@ def update_article(article_id):
     conn = get_conn()
     try:
         existing = conn.execute(
-            "SELECT id FROM articles WHERE id = ?", (article_id,)
+            "SELECT * FROM articles WHERE id = ?", (article_id,)
         ).fetchone()
         if not existing:
             return jsonify({"error": "Article not found"}), 404
@@ -763,12 +875,17 @@ def update_article(article_id):
         allowed = {
             "sentiment_label", "sentiment_score", "voice_type",
             "state", "location_relevance", "topic_tags", "entities_mentioned",
-            "key_claims", "sentiment_justification",
+            "key_claims", "sentiment_justification", "geography_scope", "county_fips",
         }
         sets = []
         params = []
+        geography_scope = data.get("geography_scope")
+        county_fips = data.get("county_fips")
+        geography_state = data.get("state")
         for key, val in data.items():
             if key not in allowed:
+                continue
+            if key in ("geography_scope", "county_fips"):
                 continue
             if key == "sentiment_score":
                 if val is None or isinstance(val, bool) or not isinstance(val, (int, float)):
@@ -787,6 +904,29 @@ def update_article(article_id):
             sets.append(f"{key} = ?")
             params.append(val)
 
+        if geography_scope:
+            if geography_scope not in ("statewide", "county", "nationwide"):
+                return jsonify({"error": "geography_scope must be statewide, county, or nationwide"}), 400
+            if geography_scope == "county" and not county_fips:
+                return jsonify({"error": "county_fips is required when geography_scope is county"}), 400
+
+            locations = _safe_json_loads(existing["locations_json"], [])
+            if not isinstance(locations, list):
+                locations = []
+            try:
+                geo.set_primary_geography(
+                    locations,
+                    geography_state or existing["state"],
+                    geography_scope,
+                    county_fips=county_fips,
+                )
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+
+            normalized_state, normalized_location = geo.derive_article_scope(locations)
+            sets.extend(["locations_json = ?", "state = ?", "location_relevance = ?"])
+            params.extend([json.dumps(locations), normalized_state, normalized_location])
+
         if not sets:
             return jsonify({"error": "No valid fields to update"}), 400
 
@@ -794,8 +934,18 @@ def update_article(article_id):
         conn.execute(
             f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", params
         )
+        if geography_scope:
+            refreshed = conn.execute(
+                "SELECT locations_json FROM articles WHERE id = ?", (article_id,)
+            ).fetchone()
+            db._sync_article_states(
+                conn,
+                article_id,
+                _safe_json_loads(refreshed["locations_json"], []),
+            )
         conn.commit()
-        return jsonify({"success": True, "updated": list(data.keys())})
+        row = conn.execute("SELECT * FROM articles WHERE id = ?", (article_id,)).fetchone()
+        return jsonify({"success": True, "updated": list(data.keys()), "article": _article_payload(row)})
     finally:
         conn.close()
 
@@ -1000,7 +1150,8 @@ def resolve_url():
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT title, source FROM articles WHERE url = ? LIMIT 1", (url,)
+                "SELECT title, source FROM articles WHERE url = ? OR resolved_url = ? LIMIT 1",
+                (url, url),
             ).fetchone()
         if row:
             title = row["title"]
@@ -1023,7 +1174,10 @@ def resolve_url():
             if table == "pending_articles":
                 conn.execute("UPDATE pending_articles SET url = ? WHERE url = ?", (resolved, url))
             else:
-                conn.execute("UPDATE articles SET url = ? WHERE url = ?", (resolved, url))
+                conn.execute(
+                    "UPDATE articles SET resolved_url = ? WHERE url = ? OR resolved_url = ?",
+                    (resolved, url, url),
+                )
             conn.commit()
         finally:
             conn.close()
@@ -1063,23 +1217,13 @@ def article_detail(article_id):
         ]
 
         return jsonify({
-            "id": row["id"],
-            "title": row["title"],
-            "source": row["source"],
-            "source_type": row["source_type"],
-            "url": row["url"],
+            **_article_payload(row),
             "published_date": row["published_date"],
             "ingested_date": row["ingested_date"],
             "analyzed": bool(row["analyzed"]),
             "analyzed_date": row["analyzed_date"],
-            "sentiment_score": row["sentiment_score"],
-            "sentiment_label": row["sentiment_label"],
-            "state": row["state"],
-            "location_relevance": row["location_relevance"],
             "topic_tags": topic_tags,
             "entities_mentioned": entities,
-            "key_claims": row["key_claims"],
-            "sentiment_justification": row["sentiment_justification"],
             "summary": row["summary"],
             "full_text": row["full_text"],
             "locations": locations,
@@ -1164,22 +1308,13 @@ def control_unanalyzed():
             "SELECT COUNT(*) as c FROM articles WHERE analyzed = 0"
         ).fetchone()["c"]
         rows = conn.execute(
-            "SELECT id, title, source, published_date, state, url "
+            "SELECT id, title, source, source_type, published_date, state, location_relevance, locations_json, url, resolved_url, "
+            "content_quality, scrape_status, scrape_attempts, last_scrape_at "
             "FROM articles WHERE analyzed = 0 "
             "ORDER BY ingested_date DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
-        articles = [
-            {
-                "id": r["id"],
-                "title": r["title"],
-                "source": r["source"],
-                "published_date": r["published_date"],
-                "state": r["state"],
-                "url": r["url"],
-            }
-            for r in rows
-        ]
+        articles = [_article_payload(r) for r in rows]
         return jsonify({
             "articles": articles,
             "total": total,
@@ -1245,6 +1380,55 @@ def control_run_analysis():
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
+    return jsonify({"task_id": task_id})
+
+
+@bp.route("/control/reprocess-low-confidence", methods=["POST"])
+@local_only
+def control_reprocess_low_confidence():
+    """Upgrade recent analyzed low-confidence articles in a bounded background task."""
+    import scraper
+
+    data = request.get_json(silent=True) or {}
+    limit = data.get("limit", 250)
+    days_back = data.get("days_back", 30)
+    try:
+        limit = max(1, min(int(limit), 1000))
+    except (TypeError, ValueError):
+        limit = 250
+    try:
+        days_back = max(1, min(int(days_back), 365))
+    except (TypeError, ValueError):
+        days_back = 30
+
+    task_id = _create_tracked_task("reprocess")
+
+    def _progress(progress):
+        _update_task_progress(task_id, progress)
+
+    def _worker():
+        conn = get_conn()
+        try:
+            result = scraper.upgrade_recent_low_confidence_articles(
+                conn,
+                days_back=days_back,
+                limit=limit,
+                progress_callback=_progress,
+            )
+            with _tasks_lock:
+                _tasks[task_id]["status"] = "completed"
+                _tasks[task_id]["finished"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+                _tasks[task_id]["result"] = result
+        except Exception as e:
+            logger.error("Task %s (reprocess) failed: %s", task_id, e)
+            with _tasks_lock:
+                _tasks[task_id]["status"] = "error"
+                _tasks[task_id]["finished"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+                _tasks[task_id]["error"] = str(e)
+        finally:
+            conn.close()
+
+    threading.Thread(target=_worker, daemon=True).start()
     return jsonify({"task_id": task_id})
 
 

@@ -1057,6 +1057,12 @@ a.article-link:hover {
 .pill-mentioned { background: rgba(250,204,21,0.15); color: #facc15; }
 .pill-rss    { background: rgba(14,165,233,0.12); color: var(--accent-blue); }
 .pill-web    { background: rgba(20,184,166,0.12); color: var(--accent-teal); }
+.pill-low-confidence {
+    background: rgba(148, 163, 184, 0.12);
+    color: #cbd5e1;
+    margin-left: 6px;
+    font-size: 9px;
+}
 
 .queue-stats { font-size: 10px; color: var(--text-muted); font-weight: 400; margin-left: 8px; }
 

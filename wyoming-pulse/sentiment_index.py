@@ -14,6 +14,8 @@ import math
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+import db
+
 logger = logging.getLogger("wyoming_pulse.sentiment_index")
 
 # ── Tuning constants ──────────────────────────────────────
@@ -81,7 +83,13 @@ def _parse_date(date_str):
             return None
 
 
-def compute_weekly_buckets(conn, state=None, county_fips=None, weeks_back=WSI_WEEKS_BACK):
+def compute_weekly_buckets(
+    conn,
+    state=None,
+    county_fips=None,
+    weeks_back=WSI_WEEKS_BACK,
+    include_low_confidence=False,
+):
     """
     Fetch analyzed articles and group them into ISO-week buckets.
 
@@ -93,6 +101,9 @@ def compute_weekly_buckets(conn, state=None, county_fips=None, weeks_back=WSI_WE
 
     where = "analyzed = 1 AND published_date IS NOT NULL AND published_date >= ?"
     params = [cutoff]
+    if not include_low_confidence:
+        where += f" AND {db.high_confidence_predicate('articles')}"
+        params.extend(db.low_confidence_params())
     if county_fips:
         fips_unpadded = county_fips.lstrip("0") or "0"
         fips_padded = county_fips.zfill(5)
@@ -228,11 +239,23 @@ def _build_period_comparison(week_data):
     }
 
 
-def compute_wsi_bundle(conn, state=None, county_fips=None, weeks_back=WSI_WEEKS_BACK):
+def compute_wsi_bundle(
+    conn,
+    state=None,
+    county_fips=None,
+    weeks_back=WSI_WEEKS_BACK,
+    include_low_confidence=False,
+):
     """
     Compute the current WSI, trend, and period comparison from a single bucket pass.
     """
-    buckets = compute_weekly_buckets(conn, state=state, county_fips=county_fips, weeks_back=weeks_back)
+    buckets = compute_weekly_buckets(
+        conn,
+        state=state,
+        county_fips=county_fips,
+        weeks_back=weeks_back,
+        include_low_confidence=include_low_confidence,
+    )
     if not buckets:
         return {
             "current_wsi": None,

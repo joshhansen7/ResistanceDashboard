@@ -9,13 +9,47 @@ import logging
 import re
 import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 
 import db
 
 logger = logging.getLogger("wyoming_pulse.scraper")
 
 # Minimum content length to consider "full" — below this, we try scraping
-THIN_CONTENT_THRESHOLD = 200
+THIN_CONTENT_THRESHOLD = db.FULL_CONTENT_THRESHOLD
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def _record_scrape_attempt(
+    conn,
+    article_id,
+    status,
+    *,
+    resolved_url=None,
+    full_text=None,
+):
+    """Persist scrape attempt metadata and optional upgraded text."""
+    sets = [
+        "scrape_status = ?",
+        "scrape_attempts = COALESCE(scrape_attempts, 0) + 1",
+        "last_scrape_at = ?",
+    ]
+    params = [status, _now_iso()]
+
+    if resolved_url:
+        sets.append("resolved_url = ?")
+        params.append(resolved_url)
+    if full_text is not None:
+        sets.append("full_text = ?")
+        params.append(full_text)
+        sets.append("content_quality = ?")
+        params.append(db.classify_content_quality(full_text))
+
+    params.append(article_id)
+    conn.execute(f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", params)
 
 
 def _try_base64_decode(url):
@@ -242,7 +276,7 @@ def scrape_thin_articles(conn, limit=None, progress_callback=None, article_ids=N
         where += f" AND id IN ({placeholders})"
         params.extend(article_ids)
     sql = f"""
-    SELECT id, url, full_text, title FROM articles
+    SELECT id, url, resolved_url, full_text, title, content_quality, source FROM articles
     WHERE {where}
     ORDER BY ingested_date ASC
     """
@@ -252,7 +286,7 @@ def scrape_thin_articles(conn, limit=None, progress_callback=None, article_ids=N
     rows = conn.execute(sql, params).fetchall()
 
     # Filter to thin content
-    thin = [r for r in rows if not r["full_text"] or len(r["full_text"]) < THIN_CONTENT_THRESHOLD]
+    thin = [r for r in rows if (r["content_quality"] or db.classify_content_quality(r["full_text"])) == "thin"]
 
     if not thin:
         logger.info("No thin articles to scrape")
@@ -268,39 +302,37 @@ def scrape_thin_articles(conn, limit=None, progress_callback=None, article_ids=N
     for i, row in enumerate(thin):
         url = row["url"]
         title = row["title"]
+        source = row["source"]
 
         if progress_callback:
             progress_callback(i + 1, len(thin))
 
         logger.info("Scraping [%d/%d]: %s", i + 1, len(thin), title[:60])
 
-        # Resolve Google News URL first, and persist the real URL
-        resolved_url = resolve_google_news_url(url)
-        if resolved_url != url:
-            try:
-                conn.execute("UPDATE articles SET url = ? WHERE id = ?", (resolved_url, row["id"]))
-                conn.commit()
+        resolved_url = row["resolved_url"] or url
+        if db.is_google_news_wrapper(url):
+            resolved_url = resolve_google_news_url(url, title=title, source=source)
+            if resolved_url != url:
                 logger.info("  -> Resolved URL: %s", resolved_url[:80])
-            except sqlite3.IntegrityError:
-                logger.warning("  -> URL already exists in DB, keeping original")
-                resolved_url = url
-            except Exception as e:
-                logger.error("  -> Failed to update resolved URL: %s", e)
-                resolved_url = url
 
         text = scrape_url(resolved_url)
         if text:
-            conn.execute(
-                "UPDATE articles SET full_text = ?, content_quality = 'full' WHERE id = ?",
-                (text, row["id"]),
+            _record_scrape_attempt(
+                conn,
+                row["id"],
+                "scraped",
+                resolved_url=resolved_url if resolved_url != url else None,
+                full_text=text,
             )
             conn.commit()
             scraped += 1
             logger.info("  -> Got %d chars", len(text))
         else:
-            conn.execute(
-                "UPDATE articles SET content_quality = 'thin' WHERE id = ? AND (content_quality IS NULL OR content_quality != 'full')",
-                (row["id"],),
+            _record_scrape_attempt(
+                conn,
+                row["id"],
+                "resolved_only" if resolved_url != url else "failed",
+                resolved_url=resolved_url if resolved_url != url else None,
             )
             conn.commit()
             failed += 1
@@ -352,13 +384,15 @@ def resolve_google_news_urls_batch(conn, limit=None, progress_callback=None):
         real_url = resolve_google_news_url(url, interval=0.5)
         if real_url != url:
             try:
-                conn.execute("UPDATE articles SET url = ? WHERE id = ?", (real_url, row["id"]))
+                conn.execute(
+                    "UPDATE articles SET resolved_url = ?, scrape_status = 'resolved_only' WHERE id = ?",
+                    (real_url, row["id"]),
+                )
                 conn.commit()
                 resolved += 1
                 logger.info("  -> %s", real_url[:80])
             except Exception as e:
-                # UNIQUE constraint: another article already has this URL (cross-query duplicate)
-                logger.warning("  -> Duplicate URL, keeping original: %s", e)
+                logger.warning("  -> Failed to store resolved URL: %s", e)
                 failed += 1
         else:
             failed += 1
@@ -367,3 +401,120 @@ def resolve_google_news_urls_batch(conn, limit=None, progress_callback=None):
         time.sleep(0.3)
 
     return {"resolved": resolved, "failed": failed, "total": len(rows)}
+
+
+def upgrade_recent_low_confidence_articles(conn, days_back=30, limit=250, progress_callback=None):
+    """
+    Reprocess recent analyzed low-confidence rows and only overwrite when scrape quality
+    materially improves the article text.
+    """
+    cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days_back)).isoformat()
+    sql = f"""
+    SELECT id, title, source, url, resolved_url, full_text, summary, content_quality
+    FROM articles
+    WHERE analyzed = 1
+      AND {db.low_confidence_predicate('articles')}
+      AND COALESCE(published_date, analyzed_date, ingested_date) >= ?
+    ORDER BY COALESCE(published_date, analyzed_date, ingested_date) DESC
+    LIMIT ?
+    """
+    rows = conn.execute(sql, db.low_confidence_params() + [cutoff, int(limit)]).fetchall()
+
+    if not rows:
+        logger.info("No recent low-confidence articles found for upgrade")
+        return {
+            "candidates": 0,
+            "attempted": 0,
+            "resolved": 0,
+            "upgraded": 0,
+            "failed": 0,
+            "not_improved": 0,
+            "reanalyzed": 0,
+        }
+
+    resolved = 0
+    upgraded = 0
+    failed = 0
+    not_improved = 0
+    upgraded_ids = []
+
+    if progress_callback:
+        progress_callback({"phase": "rescraping", "current": 0, "total": len(rows)})
+
+    for idx, row in enumerate(rows):
+        url = row["url"]
+        resolved_url = row["resolved_url"] or url
+        if db.is_google_news_wrapper(url):
+            candidate_url = resolve_google_news_url(
+                url,
+                interval=0.5,
+                title=row["title"],
+                source=row["source"],
+            )
+            if candidate_url != url:
+                resolved_url = candidate_url
+                resolved += 1
+
+        text = scrape_url(resolved_url)
+        if not text:
+            _record_scrape_attempt(
+                conn,
+                row["id"],
+                "resolved_only" if resolved_url != url else "failed",
+                resolved_url=resolved_url if resolved_url != url else None,
+            )
+            failed += 1
+        else:
+            old_text = row["full_text"] or row["summary"] or ""
+            if db.scrape_upgrade_is_material(old_text, text):
+                _record_scrape_attempt(
+                    conn,
+                    row["id"],
+                    "upgraded",
+                    resolved_url=resolved_url if resolved_url != url else None,
+                    full_text=text,
+                )
+                upgraded += 1
+                upgraded_ids.append(row["id"])
+                logger.info("Upgraded article %d with %d chars", row["id"], len(text))
+            else:
+                _record_scrape_attempt(
+                    conn,
+                    row["id"],
+                    "not_improved",
+                    resolved_url=resolved_url if resolved_url != url else None,
+                )
+                not_improved += 1
+
+        conn.commit()
+        if progress_callback:
+            progress_callback({"phase": "rescraping", "current": idx + 1, "total": len(rows)})
+        time.sleep(0.5)
+
+    reanalyzed = 0
+    if upgraded_ids:
+        import analyze
+
+        if progress_callback:
+            progress_callback({"phase": "reanalyzing", "current": 0, "total": len(upgraded_ids)})
+        result = analyze.analyze_articles(
+            article_ids=upgraded_ids,
+            include_analyzed=True,
+            skip_scrape=True,
+            progress_callback=lambda payload: progress_callback({
+                "phase": "reanalyzing",
+                "current": payload.get("current", 0),
+                "total": payload.get("total", len(upgraded_ids)),
+            }) if progress_callback and payload.get("phase") == "analyzing" else None,
+        )
+        reanalyzed = result.get("analyzed", 0)
+
+    return {
+        "candidates": len(rows),
+        "attempted": len(rows),
+        "resolved": resolved,
+        "upgraded": upgraded,
+        "failed": failed,
+        "not_improved": not_improved,
+        "reanalyzed": reanalyzed,
+    }

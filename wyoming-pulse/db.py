@@ -15,6 +15,12 @@ logger = logging.getLogger("wyoming_pulse.db")
 DB_DIR = Path(__file__).parent / "data"
 DB_PATH = DB_DIR / "wyoming_pulse.db"
 
+FULL_CONTENT_THRESHOLD = 200
+LOW_CONFIDENCE_URL_SUBSTRING = "news.google.com"
+LOW_CONFIDENCE_URL_PATTERN = f"%{LOW_CONFIDENCE_URL_SUBSTRING}%"
+MATERIAL_SCRAPE_MIN_LENGTH = 400
+MATERIAL_SCRAPE_MIN_RATIO = 2.0
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS articles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,7 +46,13 @@ CREATE TABLE IF NOT EXISTS articles (
     key_claims TEXT,
     sentiment_justification TEXT,
     analysis_raw TEXT,
-    included_in_digest TEXT
+    included_in_digest TEXT,
+    locations_json TEXT,
+    content_quality TEXT,
+    scrape_status TEXT DEFAULT 'pending',
+    scrape_attempts INTEGER DEFAULT 0,
+    last_scrape_at TEXT,
+    resolved_url TEXT
 );
 
 CREATE TABLE IF NOT EXISTS digests (
@@ -107,6 +119,55 @@ CREATE INDEX IF NOT EXISTS idx_article_states_county ON article_states(county_fi
 CREATE INDEX IF NOT EXISTS idx_article_states_state_relevance_article ON article_states(state, relevance, article_id);
 CREATE INDEX IF NOT EXISTS idx_article_states_county_relevance_article ON article_states(county_fips, relevance, article_id);
 """
+
+
+def classify_content_quality(text):
+    """Return the canonical content quality label for a body of text."""
+    return "full" if text and len(text) >= FULL_CONTENT_THRESHOLD else "thin"
+
+
+def is_google_news_wrapper(url):
+    """Return True when a URL is still a Google News wrapper."""
+    return LOW_CONFIDENCE_URL_SUBSTRING in (url or "")
+
+
+def low_confidence_predicate(alias="articles"):
+    """Reusable SQL predicate for low-confidence article rows."""
+    return f"({alias}.content_quality = 'thin' AND {alias}.url LIKE ?)"
+
+
+def low_confidence_params():
+    """Parameter list for low-confidence SQL predicates."""
+    return [LOW_CONFIDENCE_URL_PATTERN]
+
+
+def high_confidence_predicate(alias="articles"):
+    """Reusable SQL predicate for rows eligible for summary analytics."""
+    return f"NOT {low_confidence_predicate(alias)}"
+
+
+def is_low_confidence_article(row):
+    """Return True if a row or dict matches the mixed-policy low-confidence rule."""
+    if row is None:
+        return False
+    quality = row["content_quality"] if "content_quality" in row.keys() else classify_content_quality(row.get("full_text"))
+    url = row["url"] if "url" in row.keys() else row.get("url")
+    return quality == "thin" and is_google_news_wrapper(url)
+
+
+def scrape_upgrade_is_material(old_text, new_text):
+    """Only accept scrape upgrades that materially improve thin content."""
+    old_len = len(old_text or "")
+    new_len = len(new_text or "")
+    return (
+        new_len >= MATERIAL_SCRAPE_MIN_LENGTH
+        and new_len >= max(1, int(old_len * MATERIAL_SCRAPE_MIN_RATIO))
+    )
+
+
+def default_scrape_status(content_quality):
+    """Default scrape status for a newly inserted article row."""
+    return "not_needed" if content_quality == "full" else "pending"
 
 
 def get_connection(db_path=None):
@@ -187,12 +248,51 @@ def init_db(db_path=None):
             # Backfill based on current full_text length
             conn.execute("""
                 UPDATE articles SET content_quality = CASE
-                    WHEN full_text IS NULL OR LENGTH(full_text) < 200 THEN 'thin'
+                    WHEN full_text IS NULL OR LENGTH(full_text) < ? THEN 'thin'
                     ELSE 'full'
                 END
                 WHERE content_quality IS NULL
-            """)
+            """, (FULL_CONTENT_THRESHOLD,))
             logger.info("Backfilled content_quality for existing articles")
+        if "scrape_status" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN scrape_status TEXT DEFAULT 'pending'")
+            logger.info("Migrated: added scrape_status column")
+        if "scrape_attempts" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN scrape_attempts INTEGER DEFAULT 0")
+            logger.info("Migrated: added scrape_attempts column")
+        if "last_scrape_at" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN last_scrape_at TEXT")
+            logger.info("Migrated: added last_scrape_at column")
+        if "resolved_url" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN resolved_url TEXT")
+            logger.info("Migrated: added resolved_url column")
+
+        conn.execute(
+            """
+            UPDATE articles
+            SET content_quality = CASE
+                WHEN full_text IS NULL OR LENGTH(full_text) < ? THEN 'thin'
+                ELSE 'full'
+            END
+            WHERE content_quality IS NULL OR content_quality = ''
+            """,
+            (FULL_CONTENT_THRESHOLD,),
+        )
+        conn.execute(
+            """
+            UPDATE articles
+            SET scrape_status = CASE
+                WHEN content_quality = 'full' THEN 'not_needed'
+                ELSE 'pending'
+            END
+            WHERE scrape_status IS NULL OR scrape_status = ''
+            """
+        )
+        conn.execute(
+            "UPDATE articles SET scrape_attempts = 0 WHERE scrape_attempts IS NULL"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_content_quality ON articles(content_quality)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_scrape_status ON articles(scrape_status)")
 
         conn.commit()
         logger.info("Database initialized at %s", db_path or DB_PATH)
@@ -206,14 +306,16 @@ def insert_article(conn, article_data):
     Returns the row id on success, None if the article already exists (duplicate URL).
     """
     full_text = article_data.get("full_text")
-    content_quality = "full" if full_text and len(full_text) >= 200 else "thin"
+    content_quality = article_data.get("content_quality") or classify_content_quality(full_text)
+    scrape_status = article_data.get("scrape_status") or default_scrape_status(content_quality)
 
     sql = """
     INSERT OR IGNORE INTO articles
         (source, source_type, title, url, published_date, ingested_date,
          full_text, summary, matched_keywords, keyword_score,
-         state, location_relevance, content_quality)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         state, location_relevance, content_quality, scrape_status,
+         scrape_attempts, last_scrape_at, resolved_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     params = (
@@ -230,6 +332,10 @@ def insert_article(conn, article_data):
         article_data.get("state"),
         article_data.get("location_relevance"),
         content_quality,
+        scrape_status,
+        article_data.get("scrape_attempts", 0),
+        article_data.get("last_scrape_at"),
+        article_data.get("resolved_url"),
     )
     cursor = conn.execute(sql, params)
     if cursor.rowcount > 0:
@@ -260,15 +366,19 @@ def get_unanalyzed_articles(conn, limit=20):
     return conn.execute(sql, (limit,)).fetchall()
 
 
-def get_articles_by_ids(conn, article_ids, unanalyzed_only=False):
+def get_articles_by_ids(conn, article_ids, unanalyzed_only=False, analyzed_only=False):
     """Get articles by id, ordered by ingest time for stable batch processing."""
     if not article_ids:
         return []
 
     placeholders = ",".join("?" * len(article_ids))
     clauses = [f"id IN ({placeholders})"]
+    if unanalyzed_only and analyzed_only:
+        raise ValueError("Cannot request both unanalyzed_only and analyzed_only")
     if unanalyzed_only:
         clauses.append("analyzed = 0")
+    if analyzed_only:
+        clauses.append("analyzed = 1")
 
     sql = f"""
     SELECT * FROM articles
@@ -562,7 +672,7 @@ def approve_pending_articles(conn, article_ids):
             "title": row["title"],
             "url": row["url"],
             "published_date": row["published_date"],
-            "full_text": row["summary"],
+            "full_text": None if (row["source_type"] if "source_type" in row.keys() else "websearch") == "websearch" else row["summary"],
             "summary": row["summary"],
             "matched_keywords": json.loads(row["matched_keywords"]) if row["matched_keywords"] else [],
             "keyword_score": row["keyword_score"],

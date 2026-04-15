@@ -110,6 +110,41 @@ def get_state_fips(state_key):
     return info["fips"] if info else None
 
 
+def get_state_counties(state_key):
+    """Return sorted county choices for a state from the place lookup table."""
+    normalized_state = normalize_state_key(state_key)
+    if not normalized_state or normalized_state in ("nationwide", "other", "statewide"):
+        return []
+
+    counties = {}
+    for key, value in _load_place_table().items():
+        if ", " not in key:
+            continue
+        _, key_state = key.rsplit(", ", 1)
+        if key_state != normalized_state:
+            continue
+        county_name = value.get("county")
+        county_fips = normalize_fips(value.get("fips"))
+        if county_name and county_fips:
+            counties[county_fips] = county_name
+
+    return [
+        {"fips": fips, "county": county}
+        for fips, county in sorted(counties.items(), key=lambda item: item[1])
+    ]
+
+
+def resolve_county_fips(state_key, county_fips):
+    """Resolve a county FIPS to county metadata within a state."""
+    target = normalize_fips(county_fips)
+    if not target:
+        return None
+    for county in get_state_counties(state_key):
+        if county["fips"] == target:
+            return county
+    return None
+
+
 def normalize_state_key(state_key):
     """Normalize a state key: underscores to spaces, lowercase, validate.
     Returns the canonical state key if valid US state, or None.
@@ -198,6 +233,7 @@ _REGIONAL_PLACES = {
     "twin cities, minnesota": {"fips": "27053", "county": "Hennepin County"},
     "tri-cities, washington": {"fips": "53005", "county": "Benton County"},
     "lehigh valley, pennsylvania": {"fips": "42077", "county": "Lehigh County"},
+    "pittsburgh region, pennsylvania": {"fips": "42003", "county": "Allegheny County"},
     "thumb, michigan": {"fips": "26157", "county": "Tuscola County"},
 }
 
@@ -491,6 +527,202 @@ def _normalize_result_fips(result):
     return out
 
 
+def _location_place(loc, include_raw=False):
+    """Return the best available place-like label from a location dict."""
+    if not loc:
+        return None
+    return (
+        loc.get("town")
+        or loc.get("place")
+        or (loc.get("raw_place") if include_raw else None)
+    )
+
+
+def _source_place(loc):
+    """Return the original extracted location phrase when available."""
+    if not loc:
+        return None
+    return loc.get("source_place") or loc.get("raw_place") or _location_place(loc, include_raw=False) or loc.get("county")
+
+
+def _ensure_source_place(loc):
+    """Populate source_place once from the extracted phrase."""
+    source = _source_place(loc)
+    if source and loc.get("source_place") != source:
+        loc["source_place"] = source
+        return True
+    return False
+
+
+def get_primary_location(locations):
+    """Return the first primary location (or first location) from a list."""
+    if not locations or not isinstance(locations, list):
+        return None
+    return next((loc for loc in locations if loc.get("relevance") == "primary"), locations[0])
+
+
+def derive_article_scope(locations):
+    """Return backward-compatible (state, location_relevance) fields from normalized locations."""
+    primary = get_primary_location(locations)
+    if not primary:
+        return "other", "statewide"
+
+    state = normalize_state_key(primary.get("state")) or primary.get("state") or "other"
+    if state == "nationwide":
+        return state, "nationwide"
+
+    place = _location_place(primary)
+    if place:
+        return state, place
+    if primary.get("county_name"):
+        return state, primary["county_name"]
+    return state, "statewide"
+
+
+def derive_location_display(locations, fallback_state=None, fallback_location=None):
+    """Return the user-facing primary geography label: county, General, or Nationwide."""
+    primary = get_primary_location(locations)
+    if primary:
+        state = normalize_state_key(primary.get("state")) or fallback_state
+        if state == "nationwide":
+            return "Nationwide"
+        if primary.get("county_name"):
+            return primary["county_name"]
+        return "General"
+
+    if normalize_state_key(fallback_state) == "nationwide" or str(fallback_location or "").lower() == "nationwide":
+        return "Nationwide"
+    return "General"
+
+
+def _collapse_primary_location_to_statewide(loc):
+    """Downgrade an unresolved primary place to statewide while preserving the raw label."""
+    raw_place = _source_place(loc) or loc.get("raw_county")
+    changed = _ensure_source_place(loc)
+    if raw_place and loc.get("raw_place") != raw_place:
+        loc["raw_place"] = raw_place
+        changed = True
+    if loc.get("place") is not None:
+        loc["place"] = None
+        changed = True
+    if loc.get("town") is not None:
+        loc["town"] = None
+        changed = True
+    if loc.get("county_fips") is not None:
+        loc["county_fips"] = None
+        changed = True
+    if loc.get("county_name") is not None:
+        loc["county_name"] = None
+        changed = True
+    if loc.get("normalization_status") != "statewide_fallback":
+        loc["normalization_status"] = "statewide_fallback"
+        changed = True
+    return changed
+
+
+def set_primary_geography(locations, state, scope, county_fips=None):
+    """Apply a normalized geography override to the primary location."""
+    if not isinstance(locations, list):
+        locations = []
+
+    normalized_state = normalize_state_key(state) or state or "other"
+    primary = get_primary_location(locations)
+    if primary is None:
+        primary = {"relevance": "primary"}
+        locations.append(primary)
+
+    primary["state"] = normalized_state
+
+    if normalized_state == "nationwide":
+        primary["place"] = "nationwide"
+        primary["town"] = "nationwide"
+        primary["county_fips"] = None
+        primary["county_name"] = None
+        primary.pop("raw_place", None)
+        primary.pop("source_place", None)
+        primary.pop("normalization_status", None)
+        return locations
+
+    if scope == "county":
+        county = resolve_county_fips(normalized_state, county_fips)
+        if not county:
+            raise ValueError("Unknown county for selected state")
+        _ensure_source_place(primary)
+        raw_place = _source_place(primary)
+        if raw_place and raw_place != county["county"]:
+            primary["raw_place"] = raw_place
+        if not primary.get("place") and raw_place and raw_place != county["county"]:
+            primary["place"] = raw_place
+        if "town" in primary and not primary.get("town") and raw_place and raw_place != county["county"]:
+            primary["town"] = raw_place
+        primary["county"] = county["county"]
+        primary["county_fips"] = county["fips"]
+        primary["county_name"] = county["county"]
+        primary.pop("normalization_status", None)
+        return locations
+
+    _collapse_primary_location_to_statewide(primary)
+    return locations
+
+
+def normalize_location_entry(loc, geocode=True):
+    """Normalize a single location dict in-place. Returns True when fields changed."""
+    if not isinstance(loc, dict):
+        return False
+
+    changed = _ensure_source_place(loc)
+    place = _location_place(loc, include_raw=True)
+    county_hint = loc.get("county")
+    state = loc.get("state")
+
+    if place or county_hint:
+        if geocode:
+            county = normalize_location(place, state, county_hint=county_hint)
+        else:
+            county = _resolve_static(place, state, county_hint)
+        if county:
+            if place:
+                if loc.get("place") != place:
+                    loc["place"] = place
+                    changed = True
+                if "town" in loc and loc.get("town") != place:
+                    loc["town"] = place
+                    changed = True
+            if loc.get("county_fips") != county["fips"]:
+                loc["county_fips"] = county["fips"]
+                changed = True
+            if loc.get("county_name") != county["county"]:
+                loc["county_name"] = county["county"]
+                changed = True
+            if loc.pop("normalization_status", None) is not None:
+                changed = True
+        else:
+            if loc.get("county_fips") is not None:
+                loc["county_fips"] = None
+                changed = True
+            if loc.get("county_name") is not None:
+                loc["county_name"] = None
+                changed = True
+    else:
+        if loc.get("county_fips") is not None:
+            loc["county_fips"] = None
+            changed = True
+        if loc.get("county_name") is not None:
+            loc["county_name"] = None
+            changed = True
+
+    normalized_state = normalize_state_key(state)
+    if (
+        loc.get("relevance", "primary") == "primary"
+        and normalized_state not in (None, "nationwide", "other", "statewide")
+        and (_location_place(loc, include_raw=True) or county_hint)
+        and not loc.get("county_fips")
+    ):
+        changed = _collapse_primary_location_to_statewide(loc) or changed
+
+    return changed
+
+
 def normalize_locations(locations):
     """
     Take a list of location dicts from Claude and add county_fips/county_name.
@@ -503,21 +735,9 @@ def normalize_locations(locations):
               "place": "Saline Township", "county_fips": "26161", "county_name": "Washtenaw County"}]
     """
     for loc in locations:
-        town = loc.get("town") or loc.get("place")
-        county_hint = loc.get("county")
-        state = loc.get("state")
-
-        if town or county_hint:
-            county = normalize_location(town, state, county_hint=county_hint)
-            if county:
-                loc["county_fips"] = county["fips"]
-                loc["county_name"] = county["county"]
-            else:
-                loc.setdefault("county_fips", None)
-                loc.setdefault("county_name", None)
-        else:
-            loc.setdefault("county_fips", None)
-            loc.setdefault("county_name", None)
+        normalize_location_entry(loc, geocode=True)
+        loc.setdefault("county_fips", None)
+        loc.setdefault("county_name", None)
     return locations
 
 
@@ -541,7 +761,7 @@ def list_unmapped_places(conn):
         except (json.JSONDecodeError, TypeError):
             continue
         for loc in locs:
-            place = loc.get("town") or loc.get("place")
+            place = _location_place(loc, include_raw=True)
             state = loc.get("state")
             if place and state and not loc.get("county_fips"):
                 key = f"{place}, {state}"
@@ -573,7 +793,7 @@ def backfill_fips(conn, geocode=True):
     global _defer_flush
 
     rows = conn.execute(
-        "SELECT id, locations_json FROM articles WHERE locations_json IS NOT NULL"
+        "SELECT id, state, location_relevance, locations_json FROM articles WHERE locations_json IS NOT NULL"
     ).fetchall()
 
     updated = 0
@@ -589,30 +809,18 @@ def backfill_fips(conn, geocode=True):
 
             changed = False
             for loc in locs:
-                town = loc.get("town") or loc.get("place")
-                county_hint = loc.get("county")
-                state = loc.get("state")
+                changed = normalize_location_entry(loc, geocode=geocode) or changed
 
-                if not (town or county_hint) or not state:
-                    continue
+            state, location_relevance = derive_article_scope(locs)
+            scope_changed = (
+                (row["state"] or "other") != state
+                or (row["location_relevance"] or "statewide") != location_relevance
+            )
 
-                # Re-resolve: try the cascade (optionally without geocoding)
-                if not geocode:
-                    # Static-only resolution: table lookup + extraction + regional
-                    result = _resolve_static(town, state, county_hint)
-                else:
-                    result = normalize_location(town, state, county_hint=county_hint)
-
-                old_fips = loc.get("county_fips")
-                if result and result["fips"] != old_fips:
-                    loc["county_fips"] = result["fips"]
-                    loc["county_name"] = result["county"]
-                    changed = True
-
-            if changed:
+            if changed or scope_changed:
                 conn.execute(
-                    "UPDATE articles SET locations_json = ? WHERE id = ?",
-                    (json.dumps(locs), row["id"]),
+                    "UPDATE articles SET locations_json = ?, state = ?, location_relevance = ? WHERE id = ?",
+                    (json.dumps(locs), state, location_relevance, row["id"]),
                 )
                 _db._sync_article_states(conn, row["id"], locs)
                 updated += 1

@@ -153,6 +153,11 @@ function scoreToLabel(score) {
     return 'V.NEG';
 }
 
+function lowConfidenceBadgeHTML(article) {
+    if (!article || !article.is_low_confidence) return '';
+    return '<span class="pill pill-low-confidence" title="Thin Google News wrapper article. Visible in raw views, excluded from summary metrics until upgraded.">Low confidence</span> ';
+}
+
 function parseIsoDate(iso) {
     if (!iso) return null;
     const value = String(iso);
@@ -198,7 +203,9 @@ function safeHttpUrl(url) {
     return escapeHtml(trimmed);
 }
 
-function articleUrl(url, table) {
+function articleUrl(url, table, resolvedUrl) {
+    const safeResolved = safeHttpUrl(resolvedUrl);
+    if (safeResolved) return safeResolved;
     if (!url) return '#';
     if (url.includes('news.google.com')) {
         return `/api/resolve-url?url=${encodeURIComponent(url)}&table=${table || 'articles'}`;
@@ -787,19 +794,20 @@ async function updateArticlesPanel(scope) {
             if (a.key_claims) expandedHtml += `<div class="card-claims"><strong>Key Claims: </strong>${escapeHtml(a.key_claims)}</div>`;
             if (a.sentiment_justification) expandedHtml += `<div class="card-rationale"><strong>Rationale: </strong>${escapeHtml(a.sentiment_justification)}</div>`;
             if (a.url) {
-                const safeUrl = safeHttpUrl(a.url);
+                const safeUrl = articleUrl(a.url, 'articles', a.resolved_url);
                 if (safeUrl) expandedHtml += `<a href="${safeUrl}" target="_blank" rel="noopener" class="card-link">Read full article &rarr;</a>`;
             }
 
             const relTag = a.state_relevance === 'mentioned'
                 ? '<span class="pill pill-relevance pill-mentioned">Mentioned</span> '
                 : (a.state_relevance === 'primary' ? '<span class="pill pill-relevance pill-primary">Primary</span> ' : '');
+            const lowConfidence = lowConfidenceBadgeHTML(a);
             return `<div class="article-card" onclick="toggleArticleCard(this)" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleArticleCard(this)}">
                 <div class="card-header">
                     <span class="card-score" style="background:${scoreColor}">${scoreText}</span>
                     <span class="card-title">${escapeHtml(title)}</span>
                 </div>
-                <div class="card-meta">${relTag}${escapeHtml(source)} &middot; ${ago}</div>
+                <div class="card-meta">${relTag}${lowConfidence}${escapeHtml(source)} &middot; ${ago}</div>
                 ${summary ? `<div class="card-summary">${escapeHtml(summary)}</div>` : ''}
                 <div class="card-expanded">${expandedHtml}</div>
             </div>`;
@@ -1396,8 +1404,9 @@ function renderKeyArticles(articles) {
                 <span class="key-article-score" style="color:${sentimentColor(a.sentiment_score)}">${a.sentiment_score.toFixed(1)}</span>
                 <span class="key-article-meta">${escapeHtml(a.source || '')} \u2014 ${fmtDate(a.published_date)}</span>
                 <span class="pill pill-state">${getStateAbbr(a.state)}</span>
+                ${lowConfidenceBadgeHTML(a)}
             </div>
-            <div class="key-article-title">${a.url ? `<a href="${articleUrl(a.url)}" target="_blank" rel="noopener">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}</div>
+            <div class="key-article-title">${a.url ? `<a href="${articleUrl(a.url, 'articles', a.resolved_url)}" target="_blank" rel="noopener">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}</div>
             <div class="key-article-reason">${reason}</div>
             ${a.key_claims ? `<div class="key-article-claims">${escapeHtml(a.key_claims)}</div>` : ''}
         </div>`;
@@ -1466,13 +1475,16 @@ async function onStateFilterChange() {
     locSelect.value = '';
 
     if (!state || state === 'nationwide') {
-        locSelect.innerHTML = '<option value="">All Regions</option>';
+        locSelect.innerHTML = '<option value="">All Counties / General</option>';
         locSelect.disabled = state === 'nationwide';
     } else {
-        // Fetch locations for this state dynamically, use FIPS as option values
+        // Fetch normalized geography for this state: county FIPS plus a statewide bucket.
         try {
             const data = await fetchJSON(`/api/locations?state=${state}`);
-            locSelect.innerHTML = '<option value="">All Regions</option>';
+            locSelect.innerHTML = '<option value="">All Counties / General</option>';
+            if (data.statewide) {
+                locSelect.innerHTML += `<option value="statewide">General (${data.statewide.count})</option>`;
+            }
             Object.entries(data).sort((a, b) => a[0].localeCompare(b[0])).forEach(([loc, info]) => {
                 if (info.fips) {
                     const label = loc.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -1481,7 +1493,7 @@ async function onStateFilterChange() {
             });
             locSelect.disabled = false;
         } catch (err) {
-            locSelect.innerHTML = '<option value="">All Regions</option>';
+            locSelect.innerHTML = '<option value="">All Counties / General</option>';
             locSelect.disabled = false;
         }
     }
@@ -1506,6 +1518,12 @@ async function renderArticles(append = false) {
     try {
         const data = await fetchJSON(url);
         articleTotal = data.total;
+        const statesNeedingCounties = [...new Set(
+            (data.articles || [])
+                .map(a => a.state)
+                .filter(state => state && state !== 'nationwide')
+        )];
+        await Promise.all(statesNeedingCounties.map(state => _loadCountyOptions(state)));
 
         const tbody = document.getElementById('articleBody');
         const noData = document.getElementById('articleNoData');
@@ -1528,19 +1546,20 @@ async function renderArticles(append = false) {
             const relBadge = a.state_relevance === 'mentioned'
                 ? ' <span class="pill pill-relevance pill-mentioned">Mentioned</span>'
                 : (a.state_relevance === 'primary' ? ' <span class="pill pill-relevance pill-primary">Primary</span>' : '');
+            const lowConfidence = lowConfidenceBadgeHTML(a);
             return `
                 <tr style="cursor:pointer" onclick="toggleExpand(${idx})" tabindex="0" role="row" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleExpand(${idx})}">
-                    <td class="text-cell"><span onclick="event.stopPropagation();showArticleDetail(${a.id})" style="cursor:pointer;color:var(--accent)">${escapeHtml(titleTrunc)}</span></td>
+                    <td class="text-cell"><span onclick="event.stopPropagation();showArticleDetail(${a.id})" style="cursor:pointer;color:var(--accent)">${escapeHtml(titleTrunc)}</span>${lowConfidence}</td>
                     <td>${escapeHtml(a.source || '')}</td>
                     <td>${fmtDate(a.published_date)}</td>
                     <td><span class="pill ${sentimentPillClass(a.sentiment_label)}">${sentimentLabel(a.sentiment_label)}</span></td>
                     <td><span class="pill pill-state">${getStateAbbr(a.state)}</span>${relBadge}</td>
-                    <td><span class="pill pill-loc">${a.location_relevance === 'statewide' ? 'General' : capitalize(a.location_relevance || '')}</span></td>
+                    <td><span class="pill pill-loc">${escapeHtml(a.location_display || 'General')}</span></td>
                 </tr>
                 <tr class="expand-row hidden" id="expand-${idx}">
                     <td colspan="6">
                         <div class="article-detail" data-article-id="${a.id}">
-                            ${a.url ? `<a href="${articleUrl(a.url)}" target="_blank" rel="noopener" class="article-detail-url">${escapeHtml(a.url)}</a>` : ''}
+                            ${a.url ? `<a href="${articleUrl(a.url, 'articles', a.resolved_url)}" target="_blank" rel="noopener" class="article-detail-url">${escapeHtml(a.resolved_url || a.url)}</a>` : ''}
                             <div class="article-detail-grid">
                                 <div class="article-detail-section">
                                     <div class="article-detail-label">SENTIMENT</div>
@@ -1564,10 +1583,26 @@ async function renderArticles(append = false) {
                                     </div>
                                 </div>
                                 <div class="article-detail-section">
-                                    <div class="article-detail-label">REGION</div>
+                                    <div class="article-detail-label">GEOGRAPHY</div>
+                                    <div class="article-detail-value detail-geo-display">${escapeHtml(a.location_display || 'General')}</div>
+                                </div>
+                                <div class="article-detail-section">
+                                    <div class="article-detail-label">RAW PLACE</div>
+                                    <div class="article-detail-value detail-raw-place">${a.raw_primary_place ? escapeHtml(a.raw_primary_place) : '<span class="detail-empty">None</span>'}</div>
+                                </div>
+                                <div class="article-detail-section">
+                                    <div class="article-detail-label">SCOPE</div>
                                     <div class="article-detail-field">
-                                        <select class="detail-select detail-region-select" data-field="location_relevance" onchange="markArticleDirty(this)">
-                                            ${regionOptions(a.state, a.location_relevance)}
+                                        <select class="detail-select detail-geo-scope-select" data-field="geography_scope" onchange="onDetailGeographyChange(this); markArticleDirty(this)">
+                                            ${geographyScopeOptions(a.state, a.geography_scope)}
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="article-detail-section">
+                                    <div class="article-detail-label">COUNTY</div>
+                                    <div class="article-detail-field">
+                                        <select class="detail-select detail-county-select" data-field="county_fips" onchange="markArticleDirty(this)" ${a.geography_scope !== 'county' ? 'disabled' : ''}>
+                                            ${countyOptions(a.state, a.primary_county_fips, a.primary_county_name)}
                                         </select>
                                     </div>
                                 </div>
@@ -1576,6 +1611,7 @@ async function renderArticles(append = false) {
                                     <div class="article-detail-value">${capitalize(a.source_type || 'news')}</div>
                                 </div>
                             </div>
+                            ${a.is_low_confidence ? `<div class="article-detail-section"><div class="article-detail-label">QUALITY FLAG</div><div class="article-detail-value">Low confidence: thin Google News wrapper row. Excluded from summary metrics until upgraded.</div></div>` : ''}
                             <div class="article-detail-section">
                                 <div class="article-detail-label">TOPICS</div>
                                 <div class="article-detail-tags">${topics || '<span class="detail-empty">No topics</span>'}</div>
@@ -1609,44 +1645,75 @@ async function renderArticles(append = false) {
     } catch (err) { console.error('Articles error:', err); }
 }
 
-// Region options derived from config; states not listed get a generic "Statewide" entry.
-// This is populated dynamically from /api/state-locations if available,
-// but we keep a small seed for configured states.
-let _regionOptionsCache = null;
+const _countyOptionsCache = {};
 
-async function _loadRegionOptions() {
-    if (_regionOptionsCache) return _regionOptionsCache;
+async function _loadCountyOptions(state) {
+    if (!state || state === 'nationwide') return [];
+    if (_countyOptionsCache[state]) return _countyOptionsCache[state];
     try {
-        const resp = await fetchJSON('/api/state-locations');
-        _regionOptionsCache = resp.locations || {};
+        const resp = await fetchJSON(`/api/state-counties?state=${encodeURIComponent(state)}`);
+        _countyOptionsCache[state] = resp.counties || [];
     } catch {
-        _regionOptionsCache = {};
+        _countyOptionsCache[state] = [];
     }
-    return _regionOptionsCache;
+    return _countyOptionsCache[state];
 }
 
-function regionOptions(state, selected) {
+function geographyScopeOptions(state, selected) {
     if (state === 'nationwide') {
-        return `<option value="nationwide" ${selected === 'nationwide' ? 'selected' : ''}>Nationwide</option>`;
+        return '<option value="nationwide" selected>Nationwide</option>';
     }
-    // Build options: always include statewide, plus any configured locations
-    const locs = (_regionOptionsCache && _regionOptionsCache[state]) || [];
-    let opts = [['statewide', 'Statewide'], ...locs];
-    // Ensure the currently selected value is present
-    if (selected && selected !== 'statewide' && !opts.find(([v]) => v === selected)) {
-        opts.push([selected, capitalize(selected.replace(/_/g, ' '))]);
+    const scope = selected === 'county' ? 'county' : 'statewide';
+    return `
+        <option value="statewide" ${scope === 'statewide' ? 'selected' : ''}>General</option>
+        <option value="county" ${scope === 'county' ? 'selected' : ''}>County</option>
+    `;
+}
+
+function countyOptions(state, selectedFips, selectedName) {
+    if (!state || state === 'nationwide') {
+        return '<option value="">Not applicable</option>';
     }
-    return opts.map(([val, label]) =>
-        `<option value="${val}" ${val === selected ? 'selected' : ''}>${label}</option>`
+    const counties = _countyOptionsCache[state] || [];
+    let opts = [['', 'Select county']];
+    counties.forEach(c => opts.push([c.fips, c.county]));
+    if (selectedFips && !opts.find(([fips]) => fips === selectedFips)) {
+        opts.push([selectedFips, selectedName || `FIPS ${selectedFips}`]);
+    }
+    return opts.map(([value, label]) =>
+        `<option value="${value}" ${value === (selectedFips || '') ? 'selected' : ''}>${escapeHtml(label)}</option>`
     ).join('');
 }
 
-function onDetailStateChange(stateSelect) {
+async function onDetailStateChange(stateSelect) {
     const panel = stateSelect.closest('.article-detail');
-    const regionSelect = panel.querySelector('.detail-region-select');
     const newState = stateSelect.value;
-    regionSelect.innerHTML = regionOptions(newState, '');
-    regionSelect.disabled = newState === 'nationwide';
+    const scopeSelect = panel.querySelector('.detail-geo-scope-select');
+    const countySelect = panel.querySelector('.detail-county-select');
+    await _loadCountyOptions(newState);
+    if (scopeSelect) {
+        const selectedScope = newState === 'nationwide'
+            ? 'nationwide'
+            : (scopeSelect.value === 'county' ? 'county' : 'statewide');
+        scopeSelect.innerHTML = geographyScopeOptions(newState, selectedScope);
+        scopeSelect.value = newState === 'nationwide' ? 'nationwide' : selectedScope;
+    }
+    if (countySelect) {
+        countySelect.innerHTML = countyOptions(newState, '', '');
+        countySelect.disabled = newState === 'nationwide' || (scopeSelect && scopeSelect.value !== 'county');
+    }
+}
+
+function onDetailGeographyChange(scopeSelect) {
+    const panel = scopeSelect.closest('.article-detail');
+    const countySelect = panel.querySelector('.detail-county-select');
+    const stateSelect = panel.querySelector('[data-field="state"]');
+    const state = stateSelect ? stateSelect.value : '';
+    if (!countySelect) return;
+    countySelect.disabled = state === 'nationwide' || scopeSelect.value !== 'county';
+    if (scopeSelect.value !== 'county') {
+        countySelect.value = '';
+    }
 }
 
 function toggleExpand(idx) {
@@ -1681,6 +1748,8 @@ async function saveArticle(btn, articleId) {
             body: JSON.stringify(payload),
         });
         if (resp.ok) {
+            const result = await resp.json();
+            const article = result.article;
             status.textContent = 'Saved';
             status.style.color = 'var(--sent-5)';
             btn.classList.add('hidden');
@@ -1690,9 +1759,17 @@ async function saveArticle(btn, articleId) {
             if (dataRow) {
                 const cells = dataRow.querySelectorAll('td');
                 cells[3].innerHTML = `<span class="pill ${sentimentPillClass(payload.sentiment_label)}">${sentimentLabel(payload.sentiment_label)}</span>`;
-                cells[4].innerHTML = `<span class="pill pill-state">${getStateAbbr(payload.state)}</span>`;
-                cells[5].innerHTML = `<span class="pill pill-loc">${capitalize(payload.location_relevance || '')}</span>`;
+                const updated = article || articleCache[articleId] || {};
+                articleCache[articleId] = { ...(articleCache[articleId] || {}), ...updated };
+                cells[4].innerHTML = `<span class="pill pill-state">${getStateAbbr(updated.state || payload.state)}</span>`;
+                cells[5].innerHTML = `<span class="pill pill-loc">${escapeHtml(updated.location_display || 'General')}</span>`;
             }
+            const geoDisplay = panel.querySelector('.detail-geo-display');
+            if (geoDisplay) geoDisplay.textContent = (article && article.location_display) || 'General';
+            const rawPlace = panel.querySelector('.detail-raw-place');
+            if (rawPlace) rawPlace.innerHTML = (article && article.raw_primary_place)
+                ? escapeHtml(article.raw_primary_place)
+                : '<span class="detail-empty">None</span>';
         } else {
             const err = await resp.json();
             status.textContent = err.error || 'Error';
@@ -2131,7 +2208,7 @@ async function renderAnalysisQueue(append = false) {
             const titleTrunc = a.title && a.title.length > 65 ? a.title.substring(0, 62) + '...' : (a.title || '--');
             const stateAbbr = getStateAbbr(a.state);
             return `<tr>
-                <td class="text-cell">${a.url ? `<a href="${articleUrl(a.url)}" target="_blank" rel="noopener" class="article-link">${escapeHtml(titleTrunc)}</a>` : escapeHtml(titleTrunc)}</td>
+                <td class="text-cell">${a.url ? `<a href="${articleUrl(a.url, 'articles', a.resolved_url)}" target="_blank" rel="noopener" class="article-link">${escapeHtml(titleTrunc)}</a>` : escapeHtml(titleTrunc)}${lowConfidenceBadgeHTML(a)}</td>
                 <td>${escapeHtml(a.source || '')}</td>
                 <td>${fmtDate(a.published_date)}</td>
                 <td>${stateAbbr ? `<span class="pill pill-state">${stateAbbr}</span>` : '--'}</td>
@@ -2205,6 +2282,8 @@ function formatTaskResult(type, result) {
             return `Found: ${result.total_results || 0} | New: ${result.new_articles || 0} | URL dupes: ${result.skipped_url || 0} | Title dupes: ${result.skipped_title || 0}`;
         case 'analysis':
             return `Analyzed: ${result.analyzed || 0} | Errors: ${result.errors || 0}${result.scrape_scraped ? ` | Scraped: ${result.scrape_scraped}` : ''}`;
+        case 'reprocess':
+            return `Candidates: ${result.candidates || 0} | Upgraded: ${result.upgraded || 0} | Reanalyzed: ${result.reanalyzed || 0}`;
         case 'digest':
             return result.filename || result.message || 'Done';
         default:
@@ -2225,6 +2304,19 @@ function formatAnalysisProgress(progress, elapsed) {
         return `Analyzing... (${elapsed})`;
     }
     if (progress.phase === 'starting') return `Starting analysis... (${elapsed})`;
+    return `Running... (${elapsed})`;
+}
+
+function formatReprocessProgress(progress, elapsed) {
+    if (!progress || !progress.phase) return `Running... (${elapsed})`;
+    if (progress.phase === 'rescraping') {
+        if (progress.total !== undefined) return `Upgrading ${progress.current || 0} / ${progress.total}... (${elapsed})`;
+        return `Upgrading recent low-confidence rows... (${elapsed})`;
+    }
+    if (progress.phase === 'reanalyzing') {
+        if (progress.total !== undefined) return `Reanalyzing ${progress.current || 0} / ${progress.total}... (${elapsed})`;
+        return `Reanalyzing upgraded rows... (${elapsed})`;
+    }
     return `Running... (${elapsed})`;
 }
 
@@ -2271,12 +2363,14 @@ async function submitArticle(e) {
 const TASK_ENDPOINTS = {
     ingest: '/api/control/run-ingest',
     analysis: '/api/control/run-analysis',
+    reprocess: '/api/control/reprocess-low-confidence',
     digest: '/api/control/run-digest',
 };
 
 const TASK_BTN_MAP = {
     ingest: 'btnIngest',
     analysis: 'btnRunAnalysis',
+    reprocess: 'btnReprocessLowConfidence',
     digest: 'btnDigest',
 };
 
@@ -2299,6 +2393,10 @@ async function runTask(type) {
                 fetchOpts.headers = { 'Content-Type': 'application/json' };
                 fetchOpts.body = JSON.stringify({ limit: parseInt(batchVal) });
             }
+        } else if (type === 'reprocess') {
+            const batchVal = document.getElementById('reprocessBatchSize')?.value || '250';
+            fetchOpts.headers = { 'Content-Type': 'application/json' };
+            fetchOpts.body = JSON.stringify({ limit: parseInt(batchVal), days_back: 30 });
         }
         const resp = await fetch(TASK_ENDPOINTS[type], fetchOpts);
         const data = await resp.json();
@@ -2334,6 +2432,7 @@ function pollTask(taskId, type, btnId, statusId) {
                 const elapsed = formatElapsedSeconds(elapsedSecondsFromIso(data.started));
                 let msg = `Running... (${elapsed})`;
                 if (type === 'analysis') msg = formatAnalysisProgress(data.progress || {}, elapsed);
+                if (type === 'reprocess') msg = formatReprocessProgress(data.progress || {}, elapsed);
                 status.innerHTML = `<span class="task-running">${msg}</span>`;
             } else if (data.status === 'completed') {
                 clearInterval(_pollTimers[type]);
@@ -2613,7 +2712,8 @@ async function showArticleDetail(articleId) {
                 <h2 style="color:var(--text);font-size:1.1rem;margin-bottom:4px">${escapeHtml(data.title)}</h2>
                 <div class="meta-row">
                     ${escapeHtml(data.source || '')} &middot; ${fmtDate(data.published_date)} &middot; ${escapeHtml(data.source_type || '')}
-                    ${data.url ? ` &middot; <a href="${articleUrl(data.url)}" target="_blank" rel="noopener" style="color:var(--accent)">Open article &rarr;</a>` : ''}
+                    ${data.is_low_confidence ? ' &middot; Low confidence' : ''}
+                    ${data.url ? ` &middot; <a href="${articleUrl(data.url, 'articles', data.resolved_url)}" target="_blank" rel="noopener" style="color:var(--accent)">Open article &rarr;</a>` : ''}
                 </div>
 
                 <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:20px">
@@ -2628,6 +2728,8 @@ async function showArticleDetail(articleId) {
                     <h3>States & Locations</h3>
                     <div>${statesHtml}</div>
                 </div>
+
+                ${data.is_low_confidence ? `<div class="detail-section"><h3>Quality Flag</h3><div class="detail-text">Low confidence: this article still uses a thin Google News wrapper record, so it remains visible in raw browsing but is excluded from summary metrics until upgraded.</div></div>` : ''}
 
                 <div class="detail-section">
                     <h3>Topics</h3>
@@ -2726,7 +2828,7 @@ async function renderConfigSection() {
 
 // ── Init ──
 document.addEventListener('DOMContentLoaded', async () => {
-    await Promise.all([initStateDropdowns(), _loadRegionOptions()]);
+    await initStateDropdowns();
     renderDashboard();
 });
 
