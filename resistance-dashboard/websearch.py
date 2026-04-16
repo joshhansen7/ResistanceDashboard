@@ -27,7 +27,7 @@ from ingest import check_keyword_match, detect_location, _score_relevance
 from shared import load_config, get_anthropic_client
 from utils import clean_html, normalize_for_comparison
 
-logger = logging.getLogger("wyoming_pulse.websearch")
+logger = logging.getLogger("resistance_dashboard.websearch")
 
 USER_AGENT = "PrometheusDashboard/1.0 (News Research; +https://github.com/prometheus-hyperscale)"
 
@@ -372,7 +372,7 @@ def run_websearch(query=None, days_back=30, state=None,
                 if not final_state:
                     final_state = infer_state_from_text(title, summary)
 
-                location = detect_location(title, summary, config, state_key=final_state)
+                location = "international" if final_state == "international" else detect_location(title, summary, config, state_key=final_state)
 
                 matched_articles.append({
                     "source": source,

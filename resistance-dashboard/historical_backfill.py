@@ -23,7 +23,7 @@ from shared import load_config, get_anthropic_client
 from utils import clean_html, normalize_for_comparison
 from websearch import _extract_source_from_title, _check_title_similarity
 
-logger = logging.getLogger("wyoming_pulse.historical_backfill")
+logger = logging.getLogger("resistance_dashboard.historical_backfill")
 
 USER_AGENT = "PrometheusDashboard/1.0 (News Research; +https://github.com/prometheus-hyperscale)"
 

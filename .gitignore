@@ -8,10 +8,10 @@ __pycache__/
 .venv/
 
 # Data / logs (allow fixtures for seed data)
-wyoming-pulse/data/*
-!wyoming-pulse/data/fixtures/
-wyoming-pulse/logs/
-wyoming-pulse/output/
+resistance-dashboard/data/*
+!resistance-dashboard/data/fixtures/
+resistance-dashboard/logs/
+resistance-dashboard/output/
 
 # OS
 .DS_Store

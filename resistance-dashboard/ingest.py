@@ -18,7 +18,7 @@ from geo import infer_state_from_text
 from shared import load_config, get_anthropic_client
 from utils import clean_html
 
-logger = logging.getLogger("wyoming_pulse.ingest")
+logger = logging.getLogger("resistance_dashboard.ingest")
 
 USER_AGENT = "PrometheusDashboard/1.0 (RSS Feed Reader; +https://github.com/prometheus-hyperscale)"
 
@@ -389,7 +389,9 @@ def ingest_feeds(config=None, state=None):
                         final_state = matched_state or feed_state
                         if not final_state:
                             final_state = infer_state_from_text(title, summary)
-                        location = detect_location(title, summary, config, state_key=final_state)
+                        location = "international" if final_state == "international" else detect_location(
+                            title, summary, config, state_key=final_state
+                        )
 
                         # Skip articles with no URL entirely
                         if not link:

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import requests as _requests
 
-logger = logging.getLogger("wyoming_pulse.geo")
+logger = logging.getLogger("resistance_dashboard.geo")
 
 DATA_DIR = Path(__file__).parent / "data"
 PLACE_TO_COUNTY_PATH = DATA_DIR / "place_to_county.json"
@@ -29,6 +29,70 @@ _defer_flush = False  # When True, suppress per-geocode flushes (batch backfill)
 
 # Rate-limit tracking for Nominatim (max 1 req/sec per their policy)
 _last_nominatim_call = 0.0
+
+_SPECIAL_SCOPE_KEYS = ("nationwide", "other", "statewide", "international")
+_US_NATIONAL_PATTERNS = (
+    r"\bu\.?s\.?\b",
+    r"\bunited states\b",
+    r"\bamerican\b",
+    r"\bfederal\b",
+    r"\bnationwide\b",
+    r"\bacross the country\b",
+    r"\bacross the united states\b",
+    r"\bdomestic\b",
+)
+_INTERNATIONAL_PLACE_PATTERNS = (
+    ("Canada", (r"\bcanada\b", r"\bcanadian\b")),
+    ("Mexico", (r"\bmexico\b", r"\bmexican\b")),
+    ("Brazil", (r"\bbrazil\b", r"\bbrazilian\b")),
+    ("Argentina", (r"\bargentina\b", r"\bargentinian\b", r"\bargentine\b")),
+    ("Chile", (r"\bchile\b", r"\bchilean\b")),
+    ("Peru", (r"\bperu\b", r"\bperuvian\b")),
+    ("Colombia", (r"\bcolombia\b", r"\bcolombian\b")),
+    ("United Kingdom", (r"\bunited kingdom\b", r"\buk\b", r"\bbritain\b", r"\bbritish\b")),
+    ("England", (r"\bengland\b", r"\benglish\b")),
+    ("Scotland", (r"\bscotland\b", r"\bscottish\b")),
+    ("Ireland", (r"\bireland\b", r"\birish\b")),
+    ("France", (r"\bfrance\b", r"\bfrench\b")),
+    ("Germany", (r"\bgermany\b", r"\bgerman\b")),
+    ("Netherlands", (r"\bnetherlands\b", r"\bdutch\b")),
+    ("Belgium", (r"\bbelgium\b", r"\bbelgian\b")),
+    ("Switzerland", (r"\bswitzerland\b", r"\bswiss\b")),
+    ("Austria", (r"\baustria\b", r"\baustrian\b")),
+    ("Italy", (r"\bitaly\b", r"\bitalian\b")),
+    ("Spain", (r"\bspain\b", r"\bspanish\b")),
+    ("Portugal", (r"\bportugal\b", r"\bportuguese\b")),
+    ("Poland", (r"\bpoland\b", r"\bpolish\b")),
+    ("Czech Republic", (r"\bczech republic\b", r"\bczechia\b", r"\bczech\b")),
+    ("Sweden", (r"\bsweden\b", r"\bswedish\b")),
+    ("Norway", (r"\bnorway\b", r"\bnorwegian\b")),
+    ("Denmark", (r"\bdenmark\b", r"\bdanish\b")),
+    ("Finland", (r"\bfinland\b", r"\bfinnish\b")),
+    ("Ukraine", (r"\bukraine\b", r"\bukrainian\b")),
+    ("Russia", (r"\brussia\b", r"\brussian\b")),
+    ("Turkey", (r"\bturkey\b", r"\bturkish\b")),
+    ("Israel", (r"\bisrael\b", r"\bisraeli\b")),
+    ("Saudi Arabia", (r"\bsaudi arabia\b", r"\bsaudi\b")),
+    ("United Arab Emirates", (r"\bunited arab emirates\b", r"\buae\b", r"\bemirati\b")),
+    ("Qatar", (r"\bqatar\b", r"\bqatari\b")),
+    ("India", (r"\bindia\b", r"\bindian\b")),
+    ("China", (r"\bchina\b", r"\bchinese\b")),
+    ("Taiwan", (r"\btaiwan\b", r"\btaiwanese\b")),
+    ("Japan", (r"\bjapan\b", r"\bjapanese\b")),
+    ("South Korea", (r"\bsouth korea\b", r"\bkorean\b")),
+    ("Singapore", (r"\bsingapore\b", r"\bsingaporean\b")),
+    ("Malaysia", (r"\bmalaysia\b", r"\bmalaysian\b")),
+    ("Indonesia", (r"\bindonesia\b", r"\bindonesian\b")),
+    ("Vietnam", (r"\bvietnam\b", r"\bvietnamese\b")),
+    ("Thailand", (r"\bthailand\b", r"\bthai\b")),
+    ("Philippines", (r"\bphilippines\b", r"\bphilippine\b", r"\bfilipino\b")),
+    ("Australia", (r"\baustralia\b", r"\baustralian\b")),
+    ("New Zealand", (r"\bnew zealand\b", r"\bnew zealander\b")),
+    ("South Africa", (r"\bsouth africa\b", r"\bsouth african\b")),
+    ("Nigeria", (r"\bnigeria\b", r"\bnigerian\b")),
+    ("Kenya", (r"\bkenya\b", r"\bkenyan\b")),
+    ("European Union", (r"\beuropean union\b",)),
+)
 
 
 def normalize_fips(fips):
@@ -113,7 +177,7 @@ def get_state_fips(state_key):
 def get_state_counties(state_key):
     """Return sorted county choices for a state from the place lookup table."""
     normalized_state = normalize_state_key(state_key)
-    if not normalized_state or normalized_state in ("nationwide", "other", "statewide"):
+    if not normalized_state or normalized_state in ("nationwide", "other", "statewide", "international"):
         return []
 
     counties = {}
@@ -148,12 +212,12 @@ def resolve_county_fips(state_key, county_fips):
 def normalize_state_key(state_key):
     """Normalize a state key: underscores to spaces, lowercase, validate.
     Returns the canonical state key if valid US state, or None.
-    Also accepts 'nationwide' and 'district of columbia'.
+    Also accepts special dashboard scope keys such as 'nationwide' and 'international'.
     """
     if not state_key:
         return None
     key = state_key.lower().strip().replace("_", " ")
-    if key in ("nationwide", "other", "statewide"):
+    if key in _SPECIAL_SCOPE_KEYS:
         return key
     if get_state_info(key):
         return key
@@ -161,14 +225,38 @@ def normalize_state_key(state_key):
 
 
 def is_valid_us_state(state_key):
-    """Check if a state key is a valid US state (or nationwide)."""
-    return normalize_state_key(state_key) is not None
+    """Check if a key maps to a real US state (excluding special non-state scopes)."""
+    key = normalize_state_key(state_key)
+    return bool(key and get_state_info(key))
 
 
-def infer_state_from_text(title, summary=""):
+def infer_international_place(title="", summary="", content=""):
+    """Return a canonical non-US place/country hint when one is clearly present."""
+    combined = f"{title} {summary} {content}"
+    for place, patterns in _INTERNATIONAL_PLACE_PATTERNS:
+        for pattern in patterns:
+            if re.search(pattern, combined, re.IGNORECASE):
+                return place
+    return None
+
+
+def build_international_location(place=None, relevance="primary"):
+    """Build a normalized international location entry for articles outside the US."""
+    entry = {"state": "international", "relevance": relevance}
+    if place and str(place).strip().lower() != "international":
+        clean_place = str(place).strip()
+        entry["place"] = clean_place
+        entry["town"] = clean_place
+        entry["source_place"] = clean_place
+    return entry
+
+
+def infer_state_from_text(title, summary="", content=""):
     """
     Scan article title and summary for US state names and abbreviations.
-    Returns the best-matching state key (e.g. "maine") or "nationwide".
+    Returns the best-matching US state key, or one of:
+      - "nationwide" for broad US scope with no single-state focus
+      - "international" for clearly non-US coverage
 
     Full state names are matched case-insensitively.
     Two-letter abbreviations are matched only as standalone uppercase words
@@ -176,6 +264,8 @@ def infer_state_from_text(title, summary=""):
     """
     states = _load_us_states()
     if not states:
+        if infer_international_place(title, summary, content):
+            return "international"
         return "nationwide"
 
     # Build lookup structures
@@ -185,7 +275,7 @@ def infer_state_from_text(title, summary=""):
         name_to_key[info["name"].lower()] = key
         abbr_to_key[info["abbr"]] = key
 
-    combined = f"{title} {summary}"
+    combined = f"{title} {summary} {content}"
     counts = {}
 
     # Match full state names (case-insensitive, word-boundary)
@@ -205,6 +295,11 @@ def infer_state_from_text(title, summary=""):
             counts[key] = counts.get(key, 0) + hits
 
     if not counts:
+        for pattern in _US_NATIONAL_PATTERNS:
+            if re.search(pattern, combined, re.IGNORECASE):
+                return "nationwide"
+        if infer_international_place(title, summary, content):
+            return "international"
         return "nationwide"
 
     best = max(counts, key=counts.get)
@@ -570,6 +665,9 @@ def derive_article_scope(locations):
     state = normalize_state_key(primary.get("state")) or primary.get("state") or "other"
     if state == "nationwide":
         return state, "nationwide"
+    if state == "international":
+        place = _location_place(primary, include_raw=True) or primary.get("county_name")
+        return state, place or "international"
 
     place = _location_place(primary)
     if place:
@@ -586,12 +684,16 @@ def derive_location_display(locations, fallback_state=None, fallback_location=No
         state = normalize_state_key(primary.get("state")) or fallback_state
         if state == "nationwide":
             return "Nationwide"
+        if state == "international":
+            return _location_place(primary, include_raw=True) or primary.get("county_name") or "International"
         if primary.get("county_name"):
             return primary["county_name"]
         return "General"
 
     if normalize_state_key(fallback_state) == "nationwide" or str(fallback_location or "").lower() == "nationwide":
         return "Nationwide"
+    if normalize_state_key(fallback_state) == "international" or str(fallback_location or "").lower() == "international":
+        return "International"
     return "General"
 
 
@@ -640,6 +742,20 @@ def set_primary_geography(locations, state, scope, county_fips=None):
         primary["county_name"] = None
         primary.pop("raw_place", None)
         primary.pop("source_place", None)
+        primary.pop("normalization_status", None)
+        return locations
+
+    if normalized_state == "international":
+        source_place = _source_place(primary)
+        if source_place and source_place.lower() != "international":
+            primary["place"] = source_place
+            primary["town"] = source_place
+            primary["source_place"] = source_place
+        else:
+            primary["place"] = None
+            primary["town"] = None
+        primary["county_fips"] = None
+        primary["county_name"] = None
         primary.pop("normalization_status", None)
         return locations
 
@@ -712,6 +828,17 @@ def normalize_location_entry(loc, geocode=True):
             changed = True
 
     normalized_state = normalize_state_key(state)
+    if normalized_state == "international":
+        if loc.get("county_fips") is not None:
+            loc["county_fips"] = None
+            changed = True
+        if loc.get("county_name") is not None:
+            loc["county_name"] = None
+            changed = True
+        if loc.pop("normalization_status", None) is not None:
+            changed = True
+        return changed
+
     if (
         loc.get("relevance", "primary") == "primary"
         and normalized_state not in (None, "nationwide", "other", "statewide")
@@ -837,6 +964,58 @@ def backfill_fips(conn, geocode=True):
     flush_place_cache()
 
     logger.info("Backfill complete: %d/%d articles updated", updated, total)
+    return updated
+
+
+def backfill_international_articles(conn, limit=None):
+    """
+    Reassign analyzed rows that look clearly non-US from nationwide/other into
+    the explicit international bucket.
+    """
+    import db as _db
+
+    sql = """
+        SELECT id, title, summary, full_text, state, location_relevance
+        FROM articles
+        WHERE analyzed = 1
+          AND COALESCE(state, 'other') IN ('nationwide', 'other')
+        ORDER BY COALESCE(published_date, analyzed_date, ingested_date) DESC, id DESC
+    """
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+
+    rows = conn.execute(sql).fetchall()
+    updated = 0
+    for row in rows:
+        inferred_state = infer_state_from_text(
+            row["title"] or "",
+            row["summary"] or "",
+            row["full_text"] or "",
+        )
+        if inferred_state != "international":
+            continue
+
+        place = infer_international_place(
+            row["title"] or "",
+            row["summary"] or "",
+            row["full_text"] or "",
+        )
+        locations = [build_international_location(place=place)]
+        state, location_relevance = derive_article_scope(locations)
+
+        if row["state"] == state and (row["location_relevance"] or "") == location_relevance:
+            continue
+
+        conn.execute(
+            "UPDATE articles SET state = ?, location_relevance = ?, locations_json = ? WHERE id = ?",
+            (state, location_relevance, json.dumps(locations), row["id"]),
+        )
+        _db._sync_article_states(conn, row["id"], locations)
+        updated += 1
+
+    if updated:
+        conn.commit()
+    logger.info("Backfilled %d articles into international scope", updated)
     return updated
 
 

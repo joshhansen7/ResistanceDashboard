@@ -13,7 +13,7 @@ import requests
 
 from shared import load_config
 
-logger = logging.getLogger("wyoming_pulse.local_llm")
+logger = logging.getLogger("resistance_dashboard.local_llm")
 
 _ollama_checked = False
 _ollama_available = False

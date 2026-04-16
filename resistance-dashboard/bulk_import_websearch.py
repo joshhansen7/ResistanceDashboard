@@ -1,5 +1,5 @@
 """
-Wyoming Pulse — Seed Data Loader
+Prometheus Resistance Dashboard — Seed Data Loader
 Loads pre-analyzed articles from data/fixtures/seed_articles.json into
 the database so the dashboard has data to visualize immediately.
 """

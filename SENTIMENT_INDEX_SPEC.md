@@ -78,7 +78,7 @@ The WSI produces a single number on the 1.0-5.0 scale, just like raw sentiment, 
 
 ### 1.5 Implementation Location
 
-Create a new module: **`wyoming-pulse/sentiment_index.py`**
+Create a new module: **`resistance-dashboard/sentiment_index.py`**
 
 Functions:
 - `compute_weekly_buckets(conn, state=None, weeks_back=26)` — returns raw weekly aggregates
@@ -244,7 +244,7 @@ Keep it under 1000 words. Write for busy executives who want the bottom line.
 
 ### 4.4 Update HTML Export (`export.py` / `export_template.html`)
 
-- Replace "Wyoming Pulse" branding with "Prometheus Resistance Dashboard" (or appropriate name)
+- Replace legacy branding with "Prometheus Resistance Dashboard" (or appropriate name)
 - Add state tabs or sections
 - Replace daily trend chart with weekly WSI chart
 - Remove elite/public chart
@@ -312,15 +312,15 @@ Recommended sequence (each step is independently shippable):
 ### Key Files to Modify
 | File | Changes |
 |------|---------|
-| `wyoming-pulse/sentiment_index.py` | **NEW** — WSI computation engine |
-| `wyoming-pulse/dashboard/api.py` | New endpoint, remove voice-comparison |
-| `wyoming-pulse/dashboard/static/dashboard.js` | Chart updates, remove voice, add period comparison |
-| `wyoming-pulse/dashboard/templates/index.html` | Remove voice elements, add new sections |
-| `wyoming-pulse/dashboard/static/style.css` | Styling for new components |
-| `wyoming-pulse/analyze.py` | Remove voice_type from prompt |
-| `wyoming-pulse/digest.py` | Multi-state, WSI, remove elite/public |
-| `wyoming-pulse/dashboard/export.py` | Multi-state export |
-| `wyoming-pulse/dashboard/templates/export_template.html` | Updated export template |
+| `resistance-dashboard/sentiment_index.py` | **NEW** — WSI computation engine |
+| `resistance-dashboard/dashboard/api.py` | New endpoint, remove voice-comparison |
+| `resistance-dashboard/dashboard/static/dashboard.js` | Chart updates, remove voice, add period comparison |
+| `resistance-dashboard/dashboard/templates/index.html` | Remove voice elements, add new sections |
+| `resistance-dashboard/dashboard/static/style.css` | Styling for new components |
+| `resistance-dashboard/analyze.py` | Remove voice_type from prompt |
+| `resistance-dashboard/digest.py` | Multi-state, WSI, remove elite/public |
+| `resistance-dashboard/dashboard/export.py` | Multi-state export |
+| `resistance-dashboard/dashboard/templates/export_template.html` | Updated export template |
 
 ### Configuration Constants (for tuning)
 ```python

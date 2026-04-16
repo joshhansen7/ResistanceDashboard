@@ -1,5 +1,5 @@
 """
-Wyoming Pulse — Database Layer
+Prometheus Resistance Dashboard — Database Layer
 SQLite database for storing articles, sentiment analysis, and digest history.
 """
 
@@ -9,17 +9,21 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-logger = logging.getLogger("wyoming_pulse.db")
+from shared import APP_SLUG, DEFAULT_DB_PATH, resolve_db_path
+
+logger = logging.getLogger(f"{APP_SLUG}.db")
 
 # Default database path
 DB_DIR = Path(__file__).parent / "data"
-DB_PATH = DB_DIR / "wyoming_pulse.db"
+DB_PATH = DEFAULT_DB_PATH
 
 FULL_CONTENT_THRESHOLD = 200
 LOW_CONFIDENCE_URL_SUBSTRING = "news.google.com"
 LOW_CONFIDENCE_URL_PATTERN = f"%{LOW_CONFIDENCE_URL_SUBSTRING}%"
-MATERIAL_SCRAPE_MIN_LENGTH = 400
-MATERIAL_SCRAPE_MIN_RATIO = 2.0
+MATERIAL_SCRAPE_MIN_LENGTH = 250
+MATERIAL_SCRAPE_STANDARD_MIN_LENGTH = 300
+MATERIAL_SCRAPE_MIN_RATIO = 1.5
+MATERIAL_SCRAPE_SNIPPET_MAX_LENGTH = 150
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS articles (
@@ -141,9 +145,29 @@ def low_confidence_params():
     return [LOW_CONFIDENCE_URL_PATTERN]
 
 
+def international_predicate(alias="articles"):
+    """Reusable SQL predicate for non-US / international article rows."""
+    return f"({alias}.state = ? OR {alias}.location_relevance = ?)"
+
+
+def international_params():
+    """Parameter list for international SQL predicates."""
+    return ["international", "international"]
+
+
 def high_confidence_predicate(alias="articles"):
     """Reusable SQL predicate for rows eligible for summary analytics."""
     return f"NOT {low_confidence_predicate(alias)}"
+
+
+def us_aggregate_predicate(alias="articles"):
+    """Rows eligible for US-facing summary analytics."""
+    return f"({high_confidence_predicate(alias)} AND NOT {international_predicate(alias)})"
+
+
+def us_aggregate_params():
+    """Parameter list for the US-facing analytics predicate."""
+    return low_confidence_params() + international_params()
 
 
 def is_low_confidence_article(row):
@@ -155,12 +179,23 @@ def is_low_confidence_article(row):
     return quality == "thin" and is_google_news_wrapper(url)
 
 
+def is_international_article(row):
+    """Return True if a row or dict is categorized outside US aggregates."""
+    if row is None:
+        return False
+    state = row["state"] if "state" in row.keys() else row.get("state")
+    location_relevance = row["location_relevance"] if "location_relevance" in row.keys() else row.get("location_relevance")
+    return state == "international" or location_relevance == "international"
+
+
 def scrape_upgrade_is_material(old_text, new_text):
     """Only accept scrape upgrades that materially improve thin content."""
     old_len = len(old_text or "")
     new_len = len(new_text or "")
+    if old_len < MATERIAL_SCRAPE_SNIPPET_MAX_LENGTH:
+        return new_len >= MATERIAL_SCRAPE_MIN_LENGTH
     return (
-        new_len >= MATERIAL_SCRAPE_MIN_LENGTH
+        new_len >= MATERIAL_SCRAPE_STANDARD_MIN_LENGTH
         and new_len >= max(1, int(old_len * MATERIAL_SCRAPE_MIN_RATIO))
     )
 
@@ -172,7 +207,7 @@ def default_scrape_status(content_quality):
 
 def get_connection(db_path=None):
     """Get a SQLite connection, creating the database if needed."""
-    path = Path(db_path) if db_path else DB_PATH
+    path = resolve_db_path(db_path) if db_path else resolve_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
@@ -213,10 +248,10 @@ def init_db(db_path=None):
                 "SELECT id, state, location_relevance FROM articles WHERE locations_json IS NULL"
             ).fetchall()
             for r in rows:
-                state = r["state"] or "other"
+                state = r["state"] or ("international" if r["location_relevance"] == "international" else "other")
                 loc = r["location_relevance"]
                 entry = {"state": state, "relevance": "primary"}
-                if loc and loc not in ("statewide", "nationwide"):
+                if loc and loc not in ("statewide", "nationwide", "international"):
                     entry["place"] = loc
                 conn.execute(
                     "UPDATE articles SET locations_json = ? WHERE id = ?",
@@ -295,7 +330,7 @@ def init_db(db_path=None):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_scrape_status ON articles(scrape_status)")
 
         conn.commit()
-        logger.info("Database initialized at %s", db_path or DB_PATH)
+        logger.info("Database initialized at %s", resolve_db_path(db_path) if db_path else DB_PATH)
     finally:
         conn.close()
 

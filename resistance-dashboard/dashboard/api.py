@@ -1,5 +1,5 @@
 """
-Wyoming Pulse — Dashboard API Endpoints
+Prometheus Resistance Dashboard — Dashboard API Endpoints
 All /api/* routes returning JSON for the frontend.
 """
 
@@ -17,9 +17,9 @@ from flask import Blueprint, current_app, jsonify, request, send_file
 import db
 import geo
 import sentiment_index
-from shared import load_config
+from shared import REPORT_DOWNLOAD_NAME, load_config
 
-logger = logging.getLogger("wyoming_pulse.api")
+logger = logging.getLogger("resistance_dashboard.api")
 
 bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -138,6 +138,8 @@ def _humanize_location_label(value):
         return "General"
     if lower == "nationwide":
         return "Nationwide"
+    if lower == "international":
+        return "International"
     return label.title() if label == lower else label
 
 
@@ -156,8 +158,16 @@ def _article_payload(row, *, state_relevance=None):
         primary_state = geo.normalize_state_key(primary.get("state"))
         if primary_state == "nationwide":
             geography_scope = "nationwide"
+        elif primary_state == "international":
+            geography_scope = "international"
         elif primary_county_fips and primary_county_name:
             geography_scope = "county"
+    else:
+        fallback_state = geo.normalize_state_key(row["state"]) if "state" in row.keys() else None
+        if fallback_state == "nationwide":
+            geography_scope = "nationwide"
+        elif fallback_state == "international":
+            geography_scope = "international"
     location_display = geo.derive_location_display(
         locations,
         fallback_state=row["state"] if "state" in row.keys() else None,
@@ -194,6 +204,7 @@ def _article_payload(row, *, state_relevance=None):
         "scrape_attempts": row["scrape_attempts"] if "scrape_attempts" in row.keys() else None,
         "last_scrape_at": row["last_scrape_at"] if "last_scrape_at" in row.keys() else None,
         "is_low_confidence": db.is_low_confidence_article(row),
+        "is_international": db.is_international_article(row),
     }
     if state_relevance:
         payload["state_relevance"] = state_relevance
@@ -234,7 +245,7 @@ def fips_pair(fips):
 # ──────────────────────────────────────────────
 # /api/overview
 # ──────────────────────────────────────────────
-def _state_filter(include_analyzed=True, exclude_low_confidence=False, article_alias="articles"):
+def _state_filter(include_analyzed=True, exclude_low_confidence=False, exclude_international=True, article_alias="articles"):
     """Build WHERE clauses and params with optional ?state= and ?county_fips= filters.
 
     Returns (where_sql, params) where where_sql is a composed WHERE clause string.
@@ -250,6 +261,9 @@ def _state_filter(include_analyzed=True, exclude_low_confidence=False, article_a
     if exclude_low_confidence:
         clauses.append(db.high_confidence_predicate(article_alias))
         params.extend(db.low_confidence_params())
+    if exclude_international:
+        clauses.append(f"NOT {db.international_predicate(article_alias)}")
+        params.extend(db.international_params())
 
     county_fips = request.args.get("county_fips")
     if county_fips:
@@ -399,6 +413,8 @@ def state_counties():
     state = request.args.get("state", "")
     if not state:
         return jsonify({"error": "state parameter is required"}), 400
+    if state in ("nationwide", "international", "other"):
+        return jsonify({"counties": []})
     counties = geo.get_state_counties(state)
     return jsonify({"counties": counties})
 
@@ -782,11 +798,15 @@ def articles():
             )
             params.extend([fips_unpadded, fips_padded] + rel_filter_params)
         elif state:
-            where_clauses.append(
-                "articles.id IN (SELECT article_id FROM article_states WHERE state = ?" + rel_filter_sql + ")"
-            )
-            params.append(state)
-            params.extend(rel_filter_params)
+            if state in ("nationwide", "international", "other"):
+                where_clauses.append("articles.state = ?")
+                params.append(state)
+            else:
+                where_clauses.append(
+                    "articles.id IN (SELECT article_id FROM article_states WHERE state = ?" + rel_filter_sql + ")"
+                )
+                params.append(state)
+                params.extend(rel_filter_params)
         if location and not county_fips:
             where_clauses.append("location_relevance = ?")
             params.append(location)
@@ -816,7 +836,7 @@ def articles():
         filter_relevance = {}  # article_id -> "primary" | "mentioned"
         if state or county_fips:
             article_ids = [r["id"] for r in rows]
-            if article_ids:
+            if article_ids and state not in ("nationwide", "international", "other"):
                 placeholders = ",".join("?" * len(article_ids))
                 if county_fips:
                     fips_unpadded, fips_padded = fips_pair(county_fips)
@@ -905,8 +925,8 @@ def update_article(article_id):
             params.append(val)
 
         if geography_scope:
-            if geography_scope not in ("statewide", "county", "nationwide"):
-                return jsonify({"error": "geography_scope must be statewide, county, or nationwide"}), 400
+            if geography_scope not in ("statewide", "county", "nationwide", "international"):
+                return jsonify({"error": "geography_scope must be statewide, county, nationwide, or international"}), 400
             if geography_scope == "county" and not county_fips:
                 return jsonify({"error": "county_fips is required when geography_scope is county"}), 400
 
@@ -1068,7 +1088,7 @@ def digest_detail(digest_id):
 def export_report():
     from .export import generate_export_html
     html_path = generate_export_html(current_app.config["DB_PATH"])
-    return send_file(html_path, as_attachment=True, download_name="wyoming_pulse_report.html")
+    return send_file(html_path, as_attachment=True, download_name=REPORT_DOWNLOAD_NAME)
 
 
 # ──────────────────────────────────────────────
@@ -1257,7 +1277,7 @@ def control_add_article():
     summary = full_text[:500] if full_text else ""
 
     # Detect state from content
-    state = infer_state_from_text(title, summary)
+    state = infer_state_from_text(title, summary, full_text)
     if state == "nationwide":
         state = None
 
@@ -1266,6 +1286,7 @@ def control_add_article():
     matched_kw, kw_score, kw_state = check_keyword_match(title, summary, config)
     if kw_state and not state:
         state = kw_state
+    location_relevance = "international" if state == "international" else None
 
     article_data = {
         "source": meta.get("source", "Manual Entry"),
@@ -1278,6 +1299,7 @@ def control_add_article():
         "matched_keywords": matched_kw or ["manual_entry"],
         "keyword_score": kw_score if matched_kw else 1.0,
         "state": state,
+        "location_relevance": location_relevance,
     }
 
     conn = get_conn()
@@ -1392,6 +1414,7 @@ def control_reprocess_low_confidence():
     data = request.get_json(silent=True) or {}
     limit = data.get("limit", 250)
     days_back = data.get("days_back", 30)
+    oldest_first = bool(data.get("oldest_first", False))
     try:
         limit = max(1, min(int(limit), 1000))
     except (TypeError, ValueError):
@@ -1414,6 +1437,7 @@ def control_reprocess_low_confidence():
                 days_back=days_back,
                 limit=limit,
                 progress_callback=_progress,
+                oldest_first=oldest_first,
             )
             with _tasks_lock:
                 _tasks[task_id]["status"] = "completed"

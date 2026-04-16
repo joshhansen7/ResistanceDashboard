@@ -22,7 +22,7 @@ async function getStates() {
     return _statesCache;
 }
 
-const _STATE_ABBR = {"alabama":"AL","alaska":"AK","arizona":"AZ","arkansas":"AR","california":"CA","colorado":"CO","connecticut":"CT","delaware":"DE","florida":"FL","georgia":"GA","hawaii":"HI","idaho":"ID","illinois":"IL","indiana":"IN","iowa":"IA","kansas":"KS","kentucky":"KY","louisiana":"LA","maine":"ME","maryland":"MD","massachusetts":"MA","michigan":"MI","minnesota":"MN","mississippi":"MS","missouri":"MO","montana":"MT","nebraska":"NE","nevada":"NV","new hampshire":"NH","new jersey":"NJ","new mexico":"NM","new york":"NY","north carolina":"NC","north dakota":"ND","ohio":"OH","oklahoma":"OK","oregon":"OR","pennsylvania":"PA","rhode island":"RI","south carolina":"SC","south dakota":"SD","tennessee":"TN","texas":"TX","utah":"UT","vermont":"VT","virginia":"VA","washington":"WA","west virginia":"WV","wisconsin":"WI","wyoming":"WY","district of columbia":"DC","nationwide":"US"};
+const _STATE_ABBR = {"alabama":"AL","alaska":"AK","arizona":"AZ","arkansas":"AR","california":"CA","colorado":"CO","connecticut":"CT","delaware":"DE","florida":"FL","georgia":"GA","hawaii":"HI","idaho":"ID","illinois":"IL","indiana":"IN","iowa":"IA","kansas":"KS","kentucky":"KY","louisiana":"LA","maine":"ME","maryland":"MD","massachusetts":"MA","michigan":"MI","minnesota":"MN","mississippi":"MS","missouri":"MO","montana":"MT","nebraska":"NE","nevada":"NV","new hampshire":"NH","new jersey":"NJ","new mexico":"NM","new york":"NY","north carolina":"NC","north dakota":"ND","ohio":"OH","oklahoma":"OK","oregon":"OR","pennsylvania":"PA","rhode island":"RI","south carolina":"SC","south dakota":"SD","tennessee":"TN","texas":"TX","utah":"UT","vermont":"VT","virginia":"VA","washington":"WA","west virginia":"WV","wisconsin":"WI","wyoming":"WY","district of columbia":"DC","nationwide":"US","international":"INTL"};
 
 function getStateAbbr(stateKey) {
     if (!stateKey) return '--';
@@ -56,16 +56,17 @@ function buildStateOptions(selected) {
         });
     }
     // Ensure the current value is always present (even if not in cache yet)
-    if (selected && selected !== 'nationwide' && selected !== 'other'
+    if (selected && selected !== 'nationwide' && selected !== 'international' && selected !== 'other'
         && _statesCache && !_statesCache.find(s => s.key === selected)) {
         html += `<option value="${selected}" selected>${capitalize(selected)}</option>`;
     }
+    html += `<option value="international" ${selected === 'international' ? 'selected' : ''}>International</option>`;
     html += `<option value="nationwide" ${selected === 'nationwide' ? 'selected' : ''}>Nationwide</option>`;
     html += `<option value="other" ${selected === 'other' ? 'selected' : ''}>Other</option>`;
     return html;
 }
 
-async function populateStateDropdown(selectId, includeAll = true, includeNationwide = false) {
+async function populateStateDropdown(selectId, includeAll = true, includeNationwide = false, includeInternational = false) {
     const states = await getStates();
     const sel = document.getElementById(selectId);
     if (!sel) return;
@@ -77,6 +78,9 @@ async function populateStateDropdown(selectId, includeAll = true, includeNationw
     if (includeNationwide) {
         sel.innerHTML += '<option value="nationwide">Nationwide</option>';
     }
+    if (includeInternational) {
+        sel.innerHTML += '<option value="international">International</option>';
+    }
     if (val) sel.value = val; // Restore selection
 }
 
@@ -84,7 +88,7 @@ async function initStateDropdowns() {
     await Promise.all([
         populateStateDropdown('dashStateFilter'),
         populateStateDropdown('sentStateFilter'),
-        populateStateDropdown('filterState', true, true),
+        populateStateDropdown('filterState', true, true, true),
         populateStateDropdown('ctrlSearchState'),
         populateStateDropdown('ctrlSweepState'),
     ]);
@@ -156,6 +160,11 @@ function scoreToLabel(score) {
 function lowConfidenceBadgeHTML(article) {
     if (!article || !article.is_low_confidence) return '';
     return '<span class="pill pill-low-confidence" title="Thin Google News wrapper article. Visible in raw views, excluded from summary metrics until upgraded.">Low confidence</span> ';
+}
+
+function internationalBadgeHTML(article) {
+    if (!article || !article.is_international) return '';
+    return '<span class="pill pill-international" title="International article. Visible in raw views, excluded from US summary metrics and maps.">International</span> ';
 }
 
 function parseIsoDate(iso) {
@@ -917,8 +926,12 @@ function renderSentDistBar(dist) {
 
     labels.innerHTML = keys.map((k, i) => {
         const count = dist[k] || 0;
-        if (count === 0) return '';
-        return `<span style="color:${colors[i]}">${abbr[i]} ${count}</span>`;
+        return `
+            <span class="sent-dist-label" style="color:${colors[i]}">
+                <span class="sent-dist-label-text">${abbr[i]}</span>
+                <span class="sent-dist-label-count">${count}</span>
+            </span>
+        `;
     }).join('');
 }
 
@@ -1192,7 +1205,7 @@ function renderLocationHeatmap(locWeekly) {
 
     // Sort states alphabetically, skip non-tracked ones
     const trackedStates = Object.keys(data)
-        .filter(s => s !== 'nationwide' && s !== 'other')
+        .filter(s => !['nationwide', 'international', 'other'].includes(s))
         .sort();
 
     // Auto-expand states on first render
@@ -1405,6 +1418,7 @@ function renderKeyArticles(articles) {
                 <span class="key-article-meta">${escapeHtml(a.source || '')} \u2014 ${fmtDate(a.published_date)}</span>
                 <span class="pill pill-state">${getStateAbbr(a.state)}</span>
                 ${lowConfidenceBadgeHTML(a)}
+                ${internationalBadgeHTML(a)}
             </div>
             <div class="key-article-title">${a.url ? `<a href="${articleUrl(a.url, 'articles', a.resolved_url)}" target="_blank" rel="noopener">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}</div>
             <div class="key-article-reason">${reason}</div>
@@ -1474,9 +1488,9 @@ async function onStateFilterChange() {
     const locSelect = document.getElementById('filterLocation');
     locSelect.value = '';
 
-    if (!state || state === 'nationwide') {
+    if (!state || state === 'nationwide' || state === 'international') {
         locSelect.innerHTML = '<option value="">All Counties / General</option>';
-        locSelect.disabled = state === 'nationwide';
+        locSelect.disabled = state === 'nationwide' || state === 'international';
     } else {
         // Fetch normalized geography for this state: county FIPS plus a statewide bucket.
         try {
@@ -1521,7 +1535,7 @@ async function renderArticles(append = false) {
         const statesNeedingCounties = [...new Set(
             (data.articles || [])
                 .map(a => a.state)
-                .filter(state => state && state !== 'nationwide')
+                .filter(state => state && !['nationwide', 'international', 'other'].includes(state))
         )];
         await Promise.all(statesNeedingCounties.map(state => _loadCountyOptions(state)));
 
@@ -1547,9 +1561,10 @@ async function renderArticles(append = false) {
                 ? ' <span class="pill pill-relevance pill-mentioned">Mentioned</span>'
                 : (a.state_relevance === 'primary' ? ' <span class="pill pill-relevance pill-primary">Primary</span>' : '');
             const lowConfidence = lowConfidenceBadgeHTML(a);
+            const international = internationalBadgeHTML(a);
             return `
                 <tr style="cursor:pointer" onclick="toggleExpand(${idx})" tabindex="0" role="row" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleExpand(${idx})}">
-                    <td class="text-cell"><span onclick="event.stopPropagation();showArticleDetail(${a.id})" style="cursor:pointer;color:var(--accent)">${escapeHtml(titleTrunc)}</span>${lowConfidence}</td>
+                    <td class="text-cell"><span onclick="event.stopPropagation();showArticleDetail(${a.id})" style="cursor:pointer;color:var(--accent)">${escapeHtml(titleTrunc)}</span>${lowConfidence}${international}</td>
                     <td>${escapeHtml(a.source || '')}</td>
                     <td>${fmtDate(a.published_date)}</td>
                     <td><span class="pill ${sentimentPillClass(a.sentiment_label)}">${sentimentLabel(a.sentiment_label)}</span></td>
@@ -1612,6 +1627,7 @@ async function renderArticles(append = false) {
                                 </div>
                             </div>
                             ${a.is_low_confidence ? `<div class="article-detail-section"><div class="article-detail-label">QUALITY FLAG</div><div class="article-detail-value">Low confidence: thin Google News wrapper row. Excluded from summary metrics until upgraded.</div></div>` : ''}
+                            ${a.is_international ? `<div class="article-detail-section"><div class="article-detail-label">GEOGRAPHY FLAG</div><div class="article-detail-value">International article: visible in raw views, excluded from US summary metrics and maps.</div></div>` : ''}
                             <div class="article-detail-section">
                                 <div class="article-detail-label">TOPICS</div>
                                 <div class="article-detail-tags">${topics || '<span class="detail-empty">No topics</span>'}</div>
@@ -1648,7 +1664,7 @@ async function renderArticles(append = false) {
 const _countyOptionsCache = {};
 
 async function _loadCountyOptions(state) {
-    if (!state || state === 'nationwide') return [];
+    if (!state || ['nationwide', 'international', 'other'].includes(state)) return [];
     if (_countyOptionsCache[state]) return _countyOptionsCache[state];
     try {
         const resp = await fetchJSON(`/api/state-counties?state=${encodeURIComponent(state)}`);
@@ -1663,6 +1679,9 @@ function geographyScopeOptions(state, selected) {
     if (state === 'nationwide') {
         return '<option value="nationwide" selected>Nationwide</option>';
     }
+    if (state === 'international') {
+        return '<option value="international" selected>International</option>';
+    }
     const scope = selected === 'county' ? 'county' : 'statewide';
     return `
         <option value="statewide" ${scope === 'statewide' ? 'selected' : ''}>General</option>
@@ -1671,7 +1690,7 @@ function geographyScopeOptions(state, selected) {
 }
 
 function countyOptions(state, selectedFips, selectedName) {
-    if (!state || state === 'nationwide') {
+    if (!state || ['nationwide', 'international', 'other'].includes(state)) {
         return '<option value="">Not applicable</option>';
     }
     const counties = _countyOptionsCache[state] || [];
@@ -1692,15 +1711,15 @@ async function onDetailStateChange(stateSelect) {
     const countySelect = panel.querySelector('.detail-county-select');
     await _loadCountyOptions(newState);
     if (scopeSelect) {
-        const selectedScope = newState === 'nationwide'
-            ? 'nationwide'
+        const selectedScope = (newState === 'nationwide' || newState === 'international')
+            ? newState
             : (scopeSelect.value === 'county' ? 'county' : 'statewide');
         scopeSelect.innerHTML = geographyScopeOptions(newState, selectedScope);
-        scopeSelect.value = newState === 'nationwide' ? 'nationwide' : selectedScope;
+        scopeSelect.value = (newState === 'nationwide' || newState === 'international') ? newState : selectedScope;
     }
     if (countySelect) {
         countySelect.innerHTML = countyOptions(newState, '', '');
-        countySelect.disabled = newState === 'nationwide' || (scopeSelect && scopeSelect.value !== 'county');
+        countySelect.disabled = ['nationwide', 'international', 'other'].includes(newState) || (scopeSelect && scopeSelect.value !== 'county');
     }
 }
 
@@ -1710,7 +1729,7 @@ function onDetailGeographyChange(scopeSelect) {
     const stateSelect = panel.querySelector('[data-field="state"]');
     const state = stateSelect ? stateSelect.value : '';
     if (!countySelect) return;
-    countySelect.disabled = state === 'nationwide' || scopeSelect.value !== 'county';
+    countySelect.disabled = ['nationwide', 'international', 'other'].includes(state) || scopeSelect.value !== 'county';
     if (scopeSelect.value !== 'county') {
         countySelect.value = '';
     }
@@ -2208,7 +2227,7 @@ async function renderAnalysisQueue(append = false) {
             const titleTrunc = a.title && a.title.length > 65 ? a.title.substring(0, 62) + '...' : (a.title || '--');
             const stateAbbr = getStateAbbr(a.state);
             return `<tr>
-                <td class="text-cell">${a.url ? `<a href="${articleUrl(a.url, 'articles', a.resolved_url)}" target="_blank" rel="noopener" class="article-link">${escapeHtml(titleTrunc)}</a>` : escapeHtml(titleTrunc)}${lowConfidenceBadgeHTML(a)}</td>
+                <td class="text-cell">${a.url ? `<a href="${articleUrl(a.url, 'articles', a.resolved_url)}" target="_blank" rel="noopener" class="article-link">${escapeHtml(titleTrunc)}</a>` : escapeHtml(titleTrunc)}${lowConfidenceBadgeHTML(a)}${internationalBadgeHTML(a)}</td>
                 <td>${escapeHtml(a.source || '')}</td>
                 <td>${fmtDate(a.published_date)}</td>
                 <td>${stateAbbr ? `<span class="pill pill-state">${stateAbbr}</span>` : '--'}</td>

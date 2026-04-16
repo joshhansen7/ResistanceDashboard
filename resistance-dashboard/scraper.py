@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 import db
 
-logger = logging.getLogger("wyoming_pulse.scraper")
+logger = logging.getLogger("resistance_dashboard.scraper")
 
 # Minimum content length to consider "full" — below this, we try scraping
 THIN_CONTENT_THRESHOLD = db.FULL_CONTENT_THRESHOLD
@@ -403,19 +403,26 @@ def resolve_google_news_urls_batch(conn, limit=None, progress_callback=None):
     return {"resolved": resolved, "failed": failed, "total": len(rows)}
 
 
-def upgrade_recent_low_confidence_articles(conn, days_back=30, limit=250, progress_callback=None):
+def upgrade_recent_low_confidence_articles(
+    conn,
+    days_back=30,
+    limit=250,
+    progress_callback=None,
+    oldest_first=False,
+):
     """
     Reprocess recent analyzed low-confidence rows and only overwrite when scrape quality
     materially improves the article text.
     """
     cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days_back)).isoformat()
+    order_direction = "ASC" if oldest_first else "DESC"
     sql = f"""
     SELECT id, title, source, url, resolved_url, full_text, summary, content_quality
     FROM articles
     WHERE analyzed = 1
       AND {db.low_confidence_predicate('articles')}
       AND COALESCE(published_date, analyzed_date, ingested_date) >= ?
-    ORDER BY COALESCE(published_date, analyzed_date, ingested_date) DESC
+    ORDER BY COALESCE(published_date, analyzed_date, ingested_date) {order_direction}
     LIMIT ?
     """
     rows = conn.execute(sql, db.low_confidence_params() + [cutoff, int(limit)]).fetchall()

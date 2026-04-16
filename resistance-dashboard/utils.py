@@ -1,5 +1,5 @@
 """
-Wyoming Pulse — Utility Functions
+Prometheus Resistance Dashboard — Utility Functions
 Shared text processing helpers used across multiple modules.
 """
 
@@ -7,7 +7,7 @@ import json
 import logging
 import re
 
-logger = logging.getLogger("wyoming_pulse.utils")
+logger = logging.getLogger("resistance_dashboard.utils")
 
 
 def strip_markdown_fences(text):

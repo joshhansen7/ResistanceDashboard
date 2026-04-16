@@ -1,4 +1,4 @@
-/* Wyoming Pulse — Bloomberg Terminal Aesthetic */
+/* Resistance Dashboard — Bloomberg Terminal Aesthetic */
 /* Dense, data-forward, utilitarian */
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
@@ -436,9 +436,26 @@ body::after {
 
 /* ═══ PERIOD COMPARISON ═══ */
 .period-comparison { padding: 4px 0; }
-.period-row { display: flex; justify-content: space-between; align-items: baseline; padding: 4px 0; }
-.period-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); font-family: var(--font-data); }
-.period-value { font-family: var(--font-data); font-size: 16px; font-weight: 600; }
+.period-row {
+    display: grid;
+    gap: 3px;
+    justify-items: start;
+    padding: 6px 0;
+}
+.period-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    font-family: var(--font-data);
+    line-height: 1.25;
+}
+.period-value {
+    font-family: var(--font-data);
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1;
+}
 .period-change-row { border-top: 1px solid var(--border-primary); margin-top: 4px; padding-top: 8px; }
 .period-change-row .period-value { font-size: 13px; }
 
@@ -641,10 +658,10 @@ body::after {
 
 /* ═══ METRICS (dense rows, not cards) ═══ */
 .metric-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    padding: 8px 0;
+    display: grid;
+    gap: 2px;
+    justify-items: start;
+    padding: 6px 0;
     border-bottom: 1px solid rgba(26, 31, 46, 0.4);
 }
 
@@ -652,18 +669,20 @@ body::after {
 
 .metric-row .m-label {
     font-family: var(--font-ui);
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-secondary);
+    line-height: 1.15;
 }
 
 .metric-row .m-value {
     font-family: var(--font-data);
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 600;
     color: var(--text-primary);
+    line-height: 1;
 }
 
 .metric-row .m-value.sm {
@@ -691,14 +710,28 @@ body::after {
     transition: width 0.3s ease;
 }
 .sent-dist-labels {
-    display: flex;
-    gap: 3px 4px;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 4px;
     margin-top: 6px;
     font-family: var(--font-data);
-    font-size: 7.5px;
+}
+.sent-dist-label {
+    display: grid;
+    justify-items: center;
+    gap: 1px;
+    min-width: 0;
+    text-align: center;
+}
+.sent-dist-label-text,
+.sent-dist-label-count {
+    font-size: 7px;
     font-weight: 500;
     letter-spacing: 0;
+    line-height: 1.1;
+}
+.sent-dist-label-text {
+    white-space: nowrap;
 }
 
 /* ═══ CHART PANELS ═══ */
@@ -1060,6 +1093,12 @@ a.article-link:hover {
 .pill-low-confidence {
     background: rgba(148, 163, 184, 0.12);
     color: #cbd5e1;
+    margin-left: 6px;
+    font-size: 9px;
+}
+.pill-international {
+    background: rgba(14, 165, 233, 0.12);
+    color: #7dd3fc;
     margin-left: 6px;
     font-size: 9px;
 }

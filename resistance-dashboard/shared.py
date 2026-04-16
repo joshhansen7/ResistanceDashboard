@@ -1,20 +1,41 @@
 """
-Wyoming Pulse — Shared Utilities
+Prometheus Resistance Dashboard — Shared Utilities
 Common functions used across multiple modules: config loading,
-API key resolution, and Anthropic client initialization.
+path resolution, API key resolution, and Anthropic client initialization.
 """
 
 import logging
 import os
-
-import yaml
 from pathlib import Path
 
-logger = logging.getLogger("wyoming_pulse")
+import yaml
+
+APP_NAME = "Prometheus Resistance Dashboard"
+APP_SLUG = "resistance_dashboard"
+
+logger = logging.getLogger(APP_SLUG)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 APIKEY_PATH = PROJECT_ROOT.parent / "apikey.txt"
+DATA_DIR = PROJECT_ROOT / "data"
+LOG_DIR = PROJECT_ROOT / "logs"
+DEFAULT_DB_PATH = DATA_DIR / f"{APP_SLUG}.db"
+DEFAULT_LOG_PATH = LOG_DIR / f"{APP_SLUG}.log"
+REPORT_DOWNLOAD_NAME = f"{APP_SLUG}_report.html"
+
+
+def resolve_db_path(db_path=None):
+    """Resolve the canonical database path."""
+    if db_path is not None:
+        return Path(db_path)
+    return DEFAULT_DB_PATH
+
+
+def prepare_log_path():
+    """Resolve the canonical log path."""
+    DEFAULT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    return DEFAULT_LOG_PATH
 
 
 def normalize_config(config):

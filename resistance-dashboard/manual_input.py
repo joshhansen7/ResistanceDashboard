@@ -1,5 +1,5 @@
 """
-Wyoming Pulse — Manual Input Tool
+Prometheus Resistance Dashboard — Manual Input Tool
 CLI for manually adding articles, social media items, and legislative items.
 Also supports bulk CSV import.
 """
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import db
 
-logger = logging.getLogger("wyoming_pulse.manual")
+logger = logging.getLogger("resistance_dashboard.manual")
 
 
 def prompt_input(prompt_text, default=None):
@@ -232,7 +232,7 @@ def run_manual_input():
     db.init_db()
     conn = db.get_connection()
 
-    print("\nWyoming Pulse — Manual Entry")
+    print("\nPrometheus Resistance Dashboard — Manual Entry")
     print("=" * 30)
 
     try:

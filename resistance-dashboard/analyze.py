@@ -1,5 +1,5 @@
 """
-Wyoming Pulse — Sentiment Analysis
+Prometheus Resistance Dashboard — Sentiment Analysis
 Sends unanalyzed articles to Claude API for sentiment classification.
 """
 
@@ -11,7 +11,7 @@ import geo
 from shared import load_config, get_anthropic_client
 from utils import parse_json_response
 
-logger = logging.getLogger("wyoming_pulse.analyze")
+logger = logging.getLogger("resistance_dashboard.analyze")
 
 SYSTEM_PROMPT_TEMPLATE = """You are a sentiment analyst tracking public perception of data center development across the United States.
 
@@ -21,7 +21,7 @@ Analyze the following article and return a JSON object (no markdown fences, no p
   "sentiment_score": <float 1.0-5.0>,
   "sentiment_label": "<strongly_negative|slightly_negative|neutral|slightly_positive|strongly_positive>",
   "locations": [
-    {{"state": "<lowercase state name>", "town": "<city or township if known>", "county": "<county name if known>", "relevance": "<primary|mentioned>"}}
+    {{"state": "<lowercase US state name|nationwide|international>", "town": "<city, township, country, or region if known>", "county": "<county name if known>", "relevance": "<primary|mentioned>"}}
   ],
   "topic_tags": ["<from: {topic_tags}>"],
   "entities_mentioned": ["<company or organization names>"],
@@ -42,6 +42,8 @@ Geographic tagging rules for the "locations" array:
 - If the article discusses both statewide policy AND specific locations, include entries for both
 - If the article is about multiple states, include entries for each state
 - Use "nationwide" as state for federal/national scope with no single-state focus
+- Use "international" as state for stories primarily about non-US geography; put the country or city in "town" when known
+- Do not use a US state as a proxy for a foreign location, foreign dateline, or international company headquarters
 - Be specific: prefer "Saline Township" over "Ann Arbor area" if the article names the township
 - DISAMBIGUATION: When a place name exists in multiple states (e.g., Evanston in WY vs IL, Springfield in many states, Portland in OR vs ME), use context clues to determine the correct state: nearby cities mentioned, state agencies referenced, regional references, news source geography.
 
@@ -81,9 +83,16 @@ def build_user_message(article):
     )
 
 
-def parse_analysis_response(response_text):
+def parse_analysis_response(response_text, article=None):
     """Parse the JSON response from Claude, handling edge cases."""
-    from geo import derive_article_scope, normalize_locations, normalize_state_key
+    from geo import (
+        build_international_location,
+        derive_article_scope,
+        infer_international_place,
+        infer_state_from_text,
+        normalize_locations,
+        normalize_state_key,
+    )
 
     result = parse_json_response(response_text)
     if result is None:
@@ -110,9 +119,24 @@ def parse_analysis_response(response_text):
                 loc["place"] = loc["town"]
             elif "place" in loc and not loc.get("town"):
                 loc["town"] = loc["place"]
-        # Filter to only valid US states
         valid_locations = [l for l in locations if normalize_state_key(l.get("state"))]
-        locations = valid_locations if valid_locations else [{"state": "nationwide", "relevance": "primary", "place": "nationwide"}]
+        if valid_locations:
+            locations = valid_locations
+        else:
+            inferred_state = infer_state_from_text(
+                article["title"] if article else "",
+                article["summary"] if article else "",
+                article["full_text"] if article else "",
+            )
+            if inferred_state == "international":
+                place = infer_international_place(
+                    article["title"] if article else "",
+                    article["summary"] if article else "",
+                    article["full_text"] if article else "",
+                )
+                locations = [build_international_location(place=place)]
+            else:
+                locations = [{"state": "nationwide", "relevance": "primary", "place": "nationwide"}]
         # Normalize FIPS
         normalize_locations(locations)
         result["locations_json"] = locations
@@ -130,13 +154,43 @@ def parse_analysis_response(response_text):
         result["locations_json"] = locations
         result["state"], result["location_relevance"] = derive_article_scope(locations)
     else:
-        # No location data — default to nationwide (factors into national
-        # averages but not any specific state).
-        logger.info("No location data in response — defaulting to nationwide")
-        locations = [{"state": "nationwide", "relevance": "primary", "place": "nationwide"}]
+        inferred_state = infer_state_from_text(
+            article["title"] if article else "",
+            article["summary"] if article else "",
+            article["full_text"] if article else "",
+        )
+        if inferred_state == "international":
+            place = infer_international_place(
+                article["title"] if article else "",
+                article["summary"] if article else "",
+                article["full_text"] if article else "",
+            )
+            locations = [build_international_location(place=place)]
+            logger.info("No location data in response — defaulting to international")
+        else:
+            # No location data — default to nationwide (factors into national
+            # averages but not any specific state).
+            logger.info("No location data in response — defaulting to nationwide")
+            locations = [{"state": "nationwide", "relevance": "primary", "place": "nationwide"}]
         result["locations_json"] = locations
-        result["state"] = "nationwide"
-        result["location_relevance"] = "nationwide"
+        result["state"], result["location_relevance"] = derive_article_scope(locations)
+
+    # If the model labeled a row nationwide/other but the article is clearly
+    # non-US, trust the explicit international fallback to keep US analytics clean.
+    inferred_state = infer_state_from_text(
+        article["title"] if article else "",
+        article["summary"] if article else "",
+        article["full_text"] if article else "",
+    )
+    if inferred_state == "international" and result.get("state") in ("nationwide", "other", None):
+        place = infer_international_place(
+            article["title"] if article else "",
+            article["summary"] if article else "",
+            article["full_text"] if article else "",
+        )
+        locations = [build_international_location(place=place)]
+        result["locations_json"] = locations
+        result["state"], result["location_relevance"] = derive_article_scope(locations)
 
     # Clamp sentiment score to valid range
     score = result.get("sentiment_score", 3.0)
@@ -297,7 +351,7 @@ def analyze_articles(
                         total_output_tokens += usage.output_tokens
 
                         response_text = response.content[0].text
-                        analysis = parse_analysis_response(response_text)
+                        analysis = parse_analysis_response(response_text, article=article)
 
                         if analysis:
                             db.update_article_analysis(conn, article_id, analysis)

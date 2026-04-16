@@ -1,5 +1,5 @@
 """
-Wyoming Pulse — Dashboard Flask Application
+Prometheus Resistance Dashboard — Dashboard Flask Application
 Serves the web dashboard for sentiment visualization.
 """
 
@@ -14,6 +14,8 @@ from flask import Flask, render_template
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from shared import APP_NAME, resolve_db_path
+
 
 def create_app():
     """Create and configure the Flask application."""
@@ -25,7 +27,7 @@ def create_app():
         static_folder=str(Path(__file__).parent / "static"),
     )
 
-    app.config["DB_PATH"] = str(PROJECT_ROOT / "data" / "wyoming_pulse.db")
+    app.config["DB_PATH"] = str(resolve_db_path())
     db.init_db(app.config["DB_PATH"])
 
     from . import api
@@ -43,7 +45,7 @@ def start_dashboard(host="127.0.0.1", port=5000):
     # Allow PORT env var override (used by preview tools)
     port = int(os.environ.get("PORT", port))
     app = create_app()
-    print(f"\n📊 Wyoming Pulse Dashboard")
+    print(f"\n📊 {APP_NAME}")
     print(f"   Running at http://{host}:{port}")
     print(f"   Press Ctrl+C to stop\n")
     app.run(host=host, port=port, debug=False)

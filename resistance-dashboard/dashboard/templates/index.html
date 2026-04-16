@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wyoming Pulse — Prometheus</title>
+    <title>Prometheus Resistance Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -15,7 +15,7 @@
 <aside class="sidebar">
     <div class="sidebar-brand">
         <img class="logo-img" src="{{ url_for('static', filename='images/prometheus_logo.jpg') }}" alt="Prometheus Hyperscale">
-        <div class="brand-tag">wyoming pulse</div>
+        <div class="brand-tag">resistance dashboard</div>
     </div>
 
     <nav class="sidebar-nav">
@@ -234,6 +234,7 @@
                 <select id="filterState" onchange="onStateFilterChange()">
                     <option value="">All States</option>
                     <option value="nationwide">Nationwide</option>
+                    <option value="international">International</option>
                 </select>
                 <select id="filterLocation" onchange="renderArticles()">
                     <option value="">All Counties / General</option>

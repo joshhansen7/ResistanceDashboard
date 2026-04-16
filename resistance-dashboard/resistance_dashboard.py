@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Wyoming Pulse — Main CLI Entry Point
-Sentiment tracking for data center development in Wyoming.
+Prometheus Resistance Dashboard — Main CLI Entry Point
+Sentiment tracking for data center development across the United States.
 
 Usage:
-  python wyoming_pulse.py ingest          Fetch RSS feeds and filter articles
-  python wyoming_pulse.py analyze         Run sentiment analysis on new articles
-  python wyoming_pulse.py digest          Generate digest for current period
-  python wyoming_pulse.py digest --from YYYY-MM-DD --to YYYY-MM-DD
-  python wyoming_pulse.py status          Show database stats
-  python wyoming_pulse.py run             Full pipeline: ingest → analyze → digest (if due)
-  python wyoming_pulse.py manual          Launch manual input tool
-  python wyoming_pulse.py backfill        Ingest + analyze all, generate baseline digest
-  python wyoming_pulse.py sweep           Per-state sweep: search all 50 states systematically
-  python wyoming_pulse.py sweep --days 30 --state ohio
-  python wyoming_pulse.py sweep --start 2025-06-01 --end 2025-12-31
+  python resistance_dashboard.py ingest          Fetch RSS feeds and filter articles
+  python resistance_dashboard.py analyze         Run sentiment analysis on new articles
+  python resistance_dashboard.py digest          Generate digest for current period
+  python resistance_dashboard.py digest --from YYYY-MM-DD --to YYYY-MM-DD
+  python resistance_dashboard.py status          Show database stats
+  python resistance_dashboard.py run             Full pipeline: ingest → analyze → digest (if due)
+  python resistance_dashboard.py manual          Launch manual input tool
+  python resistance_dashboard.py backfill        Ingest + analyze all, generate baseline digest
+  python resistance_dashboard.py sweep           Per-state sweep: search all 50 states systematically
+  python resistance_dashboard.py sweep --days 30 --state ohio
+  python resistance_dashboard.py sweep --start 2025-06-01 --end 2025-12-31
 """
 
 import argparse
@@ -35,15 +35,14 @@ import digest
 import manual_input
 import websearch
 import historical_backfill
+from shared import APP_NAME, APP_SLUG, prepare_log_path
 
 
 def setup_logging():
     """Configure logging with both console and rotating file handler."""
-    log_dir = PROJECT_DIR / "logs"
-    log_dir.mkdir(exist_ok=True)
-    log_file = log_dir / "wyoming_pulse.log"
+    log_file = prepare_log_path()
 
-    root_logger = logging.getLogger("wyoming_pulse")
+    root_logger = logging.getLogger(APP_SLUG)
     root_logger.setLevel(logging.INFO)
 
     # Console handler
@@ -68,7 +67,7 @@ def setup_logging():
 
 def cmd_ingest(args):
     """Fetch RSS feeds and filter articles."""
-    print("\n📡 Wyoming Pulse — Ingesting feeds...")
+    print(f"\n📡 {APP_NAME} — Ingesting feeds...")
     result = ingest.ingest_feeds()
     print(f"\nResults:")
     print(f"  Feeds checked:    {result['feeds_checked']}")
@@ -79,7 +78,7 @@ def cmd_ingest(args):
 
 def cmd_analyze(args):
     """Run sentiment analysis on unanalyzed articles."""
-    print("\n🔬 Wyoming Pulse — Analyzing articles...")
+    print(f"\n🔬 {APP_NAME} — Analyzing articles...")
     result = analyze.analyze_articles()
     if result.get("error"):
         print(f"\nError: {result['error']}")
@@ -97,7 +96,7 @@ def cmd_digest(args):
     """Generate a digest report."""
     start_date = getattr(args, "from_date", None)
     end_date = getattr(args, "to_date", None)
-    print("\n📊 Wyoming Pulse — Generating digest...")
+    print(f"\n📊 {APP_NAME} — Generating digest...")
     result = digest.generate_digest(start_date=start_date, end_date=end_date)
     if not result:
         print("No analyzed articles found for the specified period.")
@@ -110,7 +109,7 @@ def cmd_status(args):
     stats = db.get_status(conn)
     conn.close()
 
-    print("\nWyoming Pulse — Status")
+    print(f"\n{APP_NAME} — Status")
     print("=" * 25)
     print(f"Database: {db.DB_PATH}")
     print(f"Total articles: {stats['total_articles']}")
@@ -144,7 +143,7 @@ def cmd_status(args):
 
 def cmd_run(args):
     """Full pipeline: ingest → analyze → digest (if due)."""
-    print("\n🚀 Wyoming Pulse — Full Pipeline Run")
+    print(f"\n🚀 {APP_NAME} — Full Pipeline Run")
     print("=" * 40)
 
     # Step 1: Ingest
@@ -193,7 +192,7 @@ def cmd_manual(args):
 
 def cmd_backfill(args):
     """Backfill: ingest + analyze all + generate baseline digest."""
-    print("\n📦 Wyoming Pulse — Backfill Mode")
+    print(f"\n📦 {APP_NAME} — Backfill Mode")
     print("=" * 35)
     print("This will ingest all available RSS content, analyze everything,")
     print("and generate a baseline digest.\n")
@@ -222,7 +221,7 @@ def cmd_backfill(args):
 
 def cmd_historical_backfill(args):
     """Historical backfill: sweep Google News with date-range queries."""
-    print("\n📜 Wyoming Pulse — Historical Backfill")
+    print(f"\n📜 {APP_NAME} — Historical Backfill")
     print("=" * 40)
 
     result = historical_backfill.run_historical_backfill(
@@ -254,7 +253,7 @@ def cmd_historical_backfill(args):
 
 def cmd_sweep(args):
     """Per-state sweep: search all 50 states with template queries."""
-    print("\n🔍 Wyoming Pulse — Per-State Sweep")
+    print(f"\n🔍 {APP_NAME} — Per-State Sweep")
     print("=" * 40)
 
     days_back = getattr(args, "days_back", 7)
@@ -308,7 +307,7 @@ def cmd_sweep(args):
 def main():
     """Main entry point with argument parsing."""
     parser = argparse.ArgumentParser(
-        description="Wyoming Pulse — Data Center Sentiment Tracker",
+        description="Prometheus Resistance Dashboard — Data Center Sentiment Tracker",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

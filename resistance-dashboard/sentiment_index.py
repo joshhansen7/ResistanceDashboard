@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 import db
 
-logger = logging.getLogger("wyoming_pulse.sentiment_index")
+logger = logging.getLogger("resistance_dashboard.sentiment_index")
 
 # ── Tuning constants ──────────────────────────────────────
 WSI_HALF_LIFE_WEEKS = 4            # Decay half-life
@@ -89,6 +89,7 @@ def compute_weekly_buckets(
     county_fips=None,
     weeks_back=WSI_WEEKS_BACK,
     include_low_confidence=False,
+    include_international=False,
 ):
     """
     Fetch analyzed articles and group them into ISO-week buckets.
@@ -104,6 +105,9 @@ def compute_weekly_buckets(
     if not include_low_confidence:
         where += f" AND {db.high_confidence_predicate('articles')}"
         params.extend(db.low_confidence_params())
+    if not include_international:
+        where += f" AND NOT {db.international_predicate('articles')}"
+        params.extend(db.international_params())
     if county_fips:
         fips_unpadded = county_fips.lstrip("0") or "0"
         fips_padded = county_fips.zfill(5)
@@ -245,6 +249,7 @@ def compute_wsi_bundle(
     county_fips=None,
     weeks_back=WSI_WEEKS_BACK,
     include_low_confidence=False,
+    include_international=False,
 ):
     """
     Compute the current WSI, trend, and period comparison from a single bucket pass.
@@ -255,6 +260,7 @@ def compute_wsi_bundle(
         county_fips=county_fips,
         weeks_back=weeks_back,
         include_low_confidence=include_low_confidence,
+        include_international=include_international,
     )
     if not buckets:
         return {

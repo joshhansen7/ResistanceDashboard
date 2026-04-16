@@ -13,7 +13,7 @@ import db
 import sentiment_index
 from shared import load_config, get_api_key
 
-logger = logging.getLogger("wyoming_pulse.digest")
+logger = logging.getLogger("resistance_dashboard.digest")
 
 OUTPUT_DIR = Path(__file__).parent / "output" / "digests"
 
