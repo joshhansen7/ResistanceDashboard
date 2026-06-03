@@ -5,6 +5,7 @@ Sends unanalyzed articles to Claude API for sentiment classification.
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import db
 import geo
@@ -81,6 +82,24 @@ def build_user_message(article):
         f"Date: {article['published_date'] or 'Unknown'}\n"
         f"Content: {content}"
     )
+
+
+def _request_analysis(article, client, model, timeout, system_prompt):
+    user_msg = build_user_message(article)
+    response = client.messages.create(
+        model=model,
+        max_tokens=1024,
+        timeout=timeout,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    usage = response.usage
+    return {
+        "article": article,
+        "response_text": response.content[0].text,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+    }
 
 
 def parse_analysis_response(response_text, article=None):
@@ -301,6 +320,7 @@ def analyze_articles(
             scrape_result = scraper.scrape_thin_articles(
                 conn,
                 article_ids=batch_ids,
+                workers=config.get("pipeline", {}).get("scrape_workers", 8),
                 progress_callback=lambda current, total: emit_progress({
                     "phase": "scraping",
                     "current": current,
@@ -314,6 +334,7 @@ def analyze_articles(
             unanalyzed_only=not include_analyzed,
             analyzed_only=include_analyzed,
         )
+        articles = [dict(row) for row in articles]
 
         if not articles:
             logger.info("Selected batch no longer has unanalyzed articles.")
@@ -328,58 +349,62 @@ def analyze_articles(
         total = len(articles)
         emit_progress({"phase": "analyzing", "current": 0, "total": total})
         with geo.deferred_place_cache_flush():
-            for idx, article in enumerate(articles):
-                article_id = article["id"]
-                title = article["title"]
-                logger.info("Analyzing: %s", title[:60])
+            workers = max(1, int(config.get("pipeline", {}).get("analysis_workers", 8)))
+            logger.info("Analyzing %d articles with %d workers", total, workers)
 
-                user_msg = build_user_message(article)
-
+            def submit_with_retries(article):
                 for attempt in range(max_retries):
                     try:
-                        response = client.messages.create(
-                            model=model,
-                            max_tokens=1024,
-                            timeout=timeout,
-                            system=system_prompt,
-                            messages=[{"role": "user", "content": user_msg}],
+                        return _request_analysis(
+                            article,
+                            client,
+                            model,
+                            timeout,
+                            system_prompt,
                         )
-
-                        # Track token usage
-                        usage = response.usage
-                        total_input_tokens += usage.input_tokens
-                        total_output_tokens += usage.output_tokens
-
-                        response_text = response.content[0].text
-                        analysis = parse_analysis_response(response_text, article=article)
-
-                        if analysis:
-                            db.update_article_analysis(conn, article_id, analysis)
-                            analyzed_count += 1
-                            logger.info(
-                                "  -> %s (%.1f) [%s]",
-                                analysis["sentiment_label"],
-                                analysis["sentiment_score"],
-                                analysis["location_relevance"],
-                            )
-                            break
-                        else:
-                            logger.warning("  -> Invalid response on attempt %d", attempt + 1)
-                            if attempt < max_retries - 1:
-                                time.sleep(2 ** attempt)
-
                     except Exception as e:
-                        logger.error("  -> API error on attempt %d: %s", attempt + 1, e)
+                        logger.error(
+                            "  -> API error on attempt %d for article %s: %s",
+                            attempt + 1,
+                            article["id"],
+                            e,
+                        )
                         if attempt < max_retries - 1:
                             time.sleep(2 ** attempt)
-                        else:
-                            error_count += 1
+                return {"article": article, "error": True}
 
-                # Report progress after each article
-                emit_progress({"phase": "analyzing", "current": idx + 1, "total": total})
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(submit_with_retries, article) for article in articles]
+                for idx, future in enumerate(as_completed(futures), start=1):
+                    result = future.result()
+                    article = result["article"]
+                    article_id = article["id"]
+                    title = article["title"]
+                    logger.info("Analyzed response [%d/%d]: %s", idx, total, title[:60])
 
-                # Brief pause between API calls
-                time.sleep(0.25)
+                    if result.get("error"):
+                        error_count += 1
+                        emit_progress({"phase": "analyzing", "current": idx, "total": total})
+                        continue
+
+                    total_input_tokens += result["input_tokens"]
+                    total_output_tokens += result["output_tokens"]
+
+                    analysis = parse_analysis_response(result["response_text"], article=article)
+                    if analysis:
+                        db.update_article_analysis(conn, article_id, analysis)
+                        analyzed_count += 1
+                        logger.info(
+                            "  -> %s (%.1f) [%s]",
+                            analysis["sentiment_label"],
+                            analysis["sentiment_score"],
+                            analysis["location_relevance"],
+                        )
+                    else:
+                        error_count += 1
+                        logger.warning("  -> Invalid response for article %s", article_id)
+
+                    emit_progress({"phase": "analyzing", "current": idx, "total": total})
     finally:
         conn.close()
 

@@ -3,225 +3,1016 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Prometheus — Resistance Dashboard Report</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <title>Prometheus Hyperscale — Data Center Sentiment Report</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg: #050810; --surface: #0a0f1a; --elevated: #0f1520;
-            --border: #1a1f2e; --text: #d4d4d4; --text2: #6b7280; --muted: #374151;
-            --teal: #14b8a6; --blue: #0ea5e9;
-            --s1: #ef4444; --s2: #f97316; --s3: #eab308; --s4: #84cc16; --s5: #22c55e;
-            --fd: 'JetBrains Mono', monospace; --fu: 'Inter', system-ui, sans-serif;
+            --bg: #ffffff;
+            --surface: #fafafa;
+            --surface-alt: #f3f4f6;
+            --border: #e5e7eb;
+            --border-strong: #d1d5db;
+            --text: #1f2937;
+            --text-muted: #6b7280;
+            --text-strong: #111827;
+            --teal: #14b8a6;
+            --teal-dark: #0d9488;
+            --teal-soft: rgba(20, 184, 166, 0.08);
+            --pos: #16a34a;
+            --pos-soft: #dcfce7;
+            --neu: #ca8a04;
+            --neu-soft: #fef9c3;
+            --neg: #dc2626;
+            --neg-soft: #fee2e2;
+            --ref-line: #9ca3af;
+            --fs: 'Inter', system-ui, -apple-system, sans-serif;
+            --fm: 'JetBrains Mono', ui-monospace, Menlo, monospace;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: var(--fu); background: var(--bg); color: var(--text); padding: 24px; max-width: 1000px; margin: 0 auto; font-size: 13px; }
+        html, body { background: var(--bg); }
+        body {
+            font-family: var(--fs);
+            color: var(--text);
+            font-size: 15px;
+            line-height: 1.55;
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 48px 40px 64px;
+        }
 
-        .header { border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 20px; }
-        .header h1 { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; color: var(--teal); }
-        .header .sub { font-family: var(--fd); font-size: 9px; color: var(--muted); margin-top: 4px; }
+        /* ── Header ─────────────────────────────────── */
+        .report-header {
+            border-bottom: 2px solid var(--teal);
+            padding-bottom: 18px;
+            margin-bottom: 36px;
+        }
+        .report-header .eyebrow {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--teal-dark);
+            letter-spacing: 0.02em;
+            margin-bottom: 6px;
+        }
+        .report-header h1 {
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--text-strong);
+            line-height: 1.2;
+            margin-bottom: 8px;
+        }
+        .report-header .sub {
+            font-size: 14px;
+            color: var(--text-muted);
+        }
 
-        .metrics { display: flex; gap: 24px; margin-bottom: 20px; flex-wrap: wrap; }
-        .m-item { display: flex; align-items: baseline; gap: 8px; }
-        .m-item .ml { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
-        .m-item .mv { font-family: var(--fd); font-size: 16px; font-weight: 600; }
+        /* ── Section scaffolding ────────────────────── */
+        section { margin-bottom: 40px; }
+        section > h2 {
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--text-strong);
+            margin-bottom: 14px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+        }
+        section > h3 {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-strong);
+            margin: 24px 0 10px;
+        }
+        p { margin-bottom: 12px; }
+        p.lede { font-size: 16px; line-height: 1.6; }
 
-        .section { background: var(--surface); border: 1px solid var(--border); padding: 12px; margin-bottom: 16px; }
-        .section h2 { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 10px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
-        canvas { max-height: 240px; }
+        /* ── Executive callouts ─────────────────────── */
+        .headline {
+            background: var(--teal-soft);
+            border-left: 4px solid var(--teal);
+            padding: 16px 20px;
+            margin: 16px 0 24px;
+            font-size: 17px;
+            font-weight: 600;
+            color: var(--text-strong);
+            line-height: 1.4;
+        }
+        .callout-row {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin: 20px 0 24px;
+        }
+        .callout {
+            flex: 1;
+            min-width: 180px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 16px 18px;
+        }
+        .callout .clabel {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+        .callout .cvalue {
+            font-family: var(--fm);
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--text-strong);
+        }
+        .callout .csub {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
 
-        table { width: 100%; border-collapse: collapse; }
-        th { text-align: left; padding: 4px 6px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border-bottom: 1px solid var(--border); }
-        td { padding: 4px 6px; font-family: var(--fd); font-size: 10px; border-bottom: 1px solid rgba(26,31,46,0.4); color: var(--text2); }
-        td.title-cell { font-family: var(--fu); font-size: 11px; color: var(--text); }
+        /* ── Tables ─────────────────────────────────── */
+        table.data {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+            margin: 8px 0;
+        }
+        table.data th {
+            text-align: left;
+            padding: 10px 12px;
+            font-weight: 600;
+            color: var(--text-strong);
+            border-bottom: 2px solid var(--border-strong);
+            background: var(--surface-alt);
+            font-size: 13px;
+        }
+        table.data th.num, table.data td.num {
+            text-align: right;
+            font-family: var(--fm);
+        }
+        table.data td {
+            padding: 9px 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+        table.data tbody tr:nth-child(even) { background: var(--surface); }
+        table.data tbody tr.wyoming-row {
+            background: var(--teal-soft) !important;
+            border-left: 3px solid var(--teal);
+            font-weight: 600;
+        }
+        table.data tbody tr.wyoming-row td:first-child {
+            border-left: 3px solid var(--teal);
+            padding-left: 14px;
+        }
 
-        .pill { display: inline-block; padding: 1px 5px; font-family: var(--fd); font-size: 8px; font-weight: 500; }
-        .pill-pos { background: rgba(34,197,94,0.15); color: var(--s5); }
-        .pill-neut { background: rgba(234,179,8,0.15); color: var(--s3); }
-        .pill-neg { background: rgba(239,68,68,0.15); color: var(--s1); }
+        .low-volume-wrap {
+            margin-top: 16px;
+        }
+        .low-volume-wrap summary {
+            cursor: pointer;
+            padding: 10px 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-weight: 500;
+            color: var(--text-muted);
+            font-size: 14px;
+            user-select: none;
+        }
+        .low-volume-wrap[open] summary { margin-bottom: 10px; }
+        table.data.muted {
+            font-size: 13px;
+        }
+        table.data.muted th, table.data.muted td {
+            color: var(--text-muted);
+        }
+        table.data.muted td.num { color: var(--text); }
 
-        .state-cards { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-        .state-card { flex: 1; min-width: 140px; background: var(--surface); border: 1px solid var(--border); padding: 10px; }
-        .state-card .sc-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
-        .state-card .sc-value { font-family: var(--fd); font-size: 20px; font-weight: 700; margin-top: 2px; }
-        .state-card .sc-change { font-family: var(--fd); font-size: 10px; margin-top: 2px; }
+        /* ── Direction pills ────────────────────────── */
+        .direction {
+            display: inline-block;
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-family: var(--fm);
+            font-size: 11px;
+            font-weight: 500;
+        }
+        .dir-improving { background: var(--pos-soft); color: var(--pos); }
+        .dir-declining { background: var(--neg-soft); color: var(--neg); }
+        .dir-flat { background: var(--surface-alt); color: var(--text-muted); }
 
-        .no-data { text-align: center; color: var(--muted); padding: 16px; font-family: var(--fd); font-size: 10px; }
-        .footer { text-align: center; color: var(--muted); font-size: 9px; margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--border); font-family: var(--fd); }
+        /* ── Label pills (sentiment) ───────────────── */
+        .label-pill {
+            display: inline-block;
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-family: var(--fm);
+            font-size: 11px;
+            font-weight: 500;
+        }
+        .lp-strongly_positive { background: var(--pos-soft); color: var(--pos); }
+        .lp-slightly_positive { background: var(--pos-soft); color: var(--pos); }
+        .lp-neutral { background: var(--neu-soft); color: var(--neu); }
+        .lp-slightly_negative { background: var(--neg-soft); color: var(--neg); }
+        .lp-strongly_negative { background: var(--neg-soft); color: var(--neg); }
 
+        /* ── Chart containers ───────────────────────── */
+        .chart-wrap {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 16px 18px;
+            margin: 12px 0;
+        }
+        .chart-wrap canvas { max-height: 280px; }
+        .chart-caption {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 6px;
+        }
+
+        /* ── Sentiment distribution bar ─────────────── */
+        .sentiment-bar {
+            display: flex;
+            width: 100%;
+            height: 32px;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 10px 0 8px;
+            border: 1px solid var(--border);
+        }
+        .sentiment-bar .seg {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: var(--fm);
+            font-size: 11px;
+            font-weight: 600;
+            color: #fff;
+        }
+        .sb-strongly_positive { background: #15803d; }
+        .sb-slightly_positive { background: #4ade80; color: #14532d; }
+        .sb-neutral { background: #fde68a; color: #78350f; }
+        .sb-slightly_negative { background: #f87171; color: #7f1d1d; }
+        .sb-strongly_negative { background: #b91c1c; }
+        .sentiment-bar .seg.zero { display: none; }
+        .sentiment-legend {
+            display: flex;
+            gap: 14px;
+            flex-wrap: wrap;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+        }
+        .sentiment-legend .swatch {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 2px;
+            margin-right: 4px;
+            vertical-align: middle;
+        }
+
+        /* ── Horizontal bar mini-chart ──────────────── */
+        .hbars { margin: 8px 0; }
+        .hbar-header, .hbar-row {
+            display: grid;
+            grid-template-columns: 220px 1fr 72px 72px;
+            align-items: center;
+            gap: 12px;
+            padding: 6px 0;
+            font-size: 13px;
+        }
+        .hbar-header {
+            padding: 4px 0 6px;
+            border-bottom: 1px solid var(--border);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+        .hbar-header .h-num, .hbar-header .h-wsi { text-align: right; }
+        .hbar-row { border-bottom: 1px solid var(--border); }
+        .hbar-row:last-child { border-bottom: none; }
+        .hbar-row .hbar-label { color: var(--text); }
+        .hbar-row .hbar-track {
+            background: var(--surface-alt);
+            height: 14px;
+            border-radius: 7px;
+            overflow: hidden;
+            position: relative;
+        }
+        .hbar-row .hbar-fill {
+            height: 100%;
+            border-radius: 7px;
+        }
+        .hbar-row .hbar-count,
+        .hbar-row .hbar-wsi {
+            text-align: right;
+            font-family: var(--fm);
+            font-size: 13px;
+        }
+        .hbar-row .hbar-count { color: var(--text); font-weight: 600; }
+        .hbar-row .hbar-wsi  { font-weight: 600; }
+        /* Entity bars: no WSI column, stretch numeric to end */
+        .hbars.entities .hbar-header, .hbars.entities .hbar-row {
+            grid-template-columns: 220px 1fr 72px;
+        }
+
+        /* ── Article cards ──────────────────────────── */
+        .article-list { margin: 8px 0; }
+        .article-item {
+            padding: 12px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .article-item:last-child { border-bottom: none; }
+        .article-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-strong);
+            text-decoration: none;
+            display: block;
+            margin-bottom: 4px;
+        }
+        .article-title:hover {
+            color: var(--teal-dark);
+            text-decoration: underline;
+        }
+        .article-meta {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            align-items: center;
+        }
+        .article-meta .score {
+            font-family: var(--fm);
+            font-weight: 600;
+        }
+        .article-claims {
+            font-size: 13px;
+            color: var(--text);
+            line-height: 1.5;
+        }
+
+        /* ── Methodology list ───────────────────────── */
+        .method-grid dt {
+            font-weight: 600;
+            color: var(--text-strong);
+            font-size: 14px;
+            margin-top: 14px;
+        }
+        .method-grid dd {
+            font-size: 14px;
+            color: var(--text);
+            margin-top: 2px;
+        }
+        .source-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 6px 18px;
+            font-size: 13px;
+            margin-top: 8px;
+        }
+        .source-grid .s-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 2px 0;
+            border-bottom: 1px dotted var(--border);
+        }
+        .source-grid .s-name { color: var(--text); }
+        .source-grid .s-count {
+            font-family: var(--fm);
+            color: var(--text-muted);
+        }
+
+        /* ── Footer ─────────────────────────────────── */
+        .report-footer {
+            margin-top: 48px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border);
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .no-data {
+            padding: 14px;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 13px;
+            font-style: italic;
+        }
+
+        /* ── Print styles ───────────────────────────── */
         @media print {
-            body { background: #fff; color: #1a1a1a; }
-            .section { border: 1px solid #ddd; background: #fafafa; }
-            .header h1 { color: #0d9488; }
-            td, th { color: #333; }
+            body {
+                padding: 20px;
+                max-width: none;
+                font-size: 11pt;
+                color: #1a1a1a;
+            }
+            section { page-break-inside: avoid; margin-bottom: 20px; }
+            .chart-wrap { page-break-inside: avoid; }
+            .report-header h1 { font-size: 22pt; }
+            .callout-row { gap: 10px; }
+            .callout { min-width: 130px; padding: 10px 12px; }
+            table.data { font-size: 10pt; }
+            details.low-volume-wrap[open] summary { color: #333; }
+            a { color: #0d9488; }
         }
     </style>
 </head>
 <body>
 
-<div class="header">
-    <h1>Prometheus &mdash; Resistance Dashboard</h1>
-    <div class="sub">Sentiment Intelligence Report &mdash; {{GENERATED_DATE}}</div>
-</div>
+<header class="report-header">
+    <div class="eyebrow">Prometheus Hyperscale</div>
+    <h1>Data Center Sentiment Report</h1>
+    <div class="sub">Generated {{GENERATED_DATE}}</div>
+</header>
 
-<div class="metrics" id="metricsRow"></div>
-<div class="state-cards" id="stateCards"></div>
+<section id="executive-summary">
+    <h2>Executive Summary</h2>
+    <div id="headlineBox" class="headline"></div>
+    <div class="callout-row" id="calloutRow"></div>
+    <p class="lede" id="methodOneLiner"></p>
+</section>
 
-<div class="section">
-    <h2>Sentiment Index Trend</h2>
-    <canvas id="trendChart"></canvas>
-</div>
-
-<div class="section">
-    <h2>Location Analysis</h2>
-    <canvas id="locationChart"></canvas>
-</div>
-
-<div class="section">
-    <h2>Topics</h2>
-    <canvas id="topicChart"></canvas>
-</div>
-
-<div class="section">
-    <h2>Articles</h2>
-    <table id="articlesTable">
-        <thead><tr><th>Title</th><th>Source</th><th>Date</th><th>Sentiment</th><th>State</th><th>Location</th></tr></thead>
+<section id="state-ranking">
+    <h2>State Ranking</h2>
+    <p>
+        Every US state with analyzed coverage is ranked by Weighted Sentiment Index (WSI),
+        scaled 1.0 (strongly negative) to 5.0 (strongly positive), with 3.0 neutral. States
+        with at least <strong id="thresholdLabel">50</strong> analyzed articles are shown first;
+        smaller-sample states follow in a collapsible section.
+    </p>
+    <h3>High-Volume States <span style="color: var(--text-muted); font-weight: 400; font-size: 13px;">(n ≥ 50)</span></h3>
+    <table class="data" id="rankingTableHigh">
+        <thead>
+            <tr>
+                <th>State</th>
+                <th class="num">Articles</th>
+                <th class="num">WSI</th>
+                <th class="num">4-wk current</th>
+                <th class="num">4-wk prior</th>
+                <th>Direction</th>
+            </tr>
+        </thead>
         <tbody></tbody>
     </table>
-</div>
 
-<div class="footer">Prometheus Hyperscale &mdash; Resistance Dashboard Intelligence &mdash; Confidential</div>
+    <details class="low-volume-wrap">
+        <summary>Low-volume states (small sample, n &lt; 50) — click to expand</summary>
+        <table class="data muted" id="rankingTableLow">
+            <thead>
+                <tr>
+                    <th>State</th>
+                    <th class="num">Articles</th>
+                    <th class="num">WSI</th>
+                    <th class="num">4-wk current</th>
+                    <th class="num">4-wk prior</th>
+                    <th>Direction</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </details>
+</section>
+
+<section id="overall-trend">
+    <h2>Overall Trend</h2>
+    <p>
+        Weekly Weighted Sentiment Index across all US states over the past 26 weeks.
+        Dashed segments indicate weeks with no new coverage (carry-forward from the
+        prior known value).
+    </p>
+    <div class="chart-wrap">
+        <canvas id="overallTrendChart"></canvas>
+    </div>
+</section>
+
+<section id="wyoming-deep-dive">
+    <h2>Wyoming Deep Dive</h2>
+    <p id="wyIntro"></p>
+
+    <h3>Weekly sentiment: Wyoming vs. US overall</h3>
+    <div class="chart-wrap">
+        <canvas id="wyTrendChart"></canvas>
+    </div>
+
+    <h3>Sentiment distribution</h3>
+    <div class="sentiment-legend" id="wySentimentLegend"></div>
+    <div class="sentiment-bar" id="wySentimentBar"></div>
+    <div class="chart-caption" id="wySentimentCaption"></div>
+
+    <h3>Topic mix</h3>
+    <p class="chart-caption" style="margin-bottom: 8px;">
+        Each row counts Wyoming articles tagged with that topic. The rightmost column is the
+        average Weighted Sentiment Index (WSI) across those articles — a 1.0–5.0 score where
+        3.0 is neutral, below 3.0 skews negative, and above 3.0 skews positive. Bar width is
+        scaled to the article count; bar color encodes the average WSI.
+    </p>
+    <div class="hbars" id="wyTopics"></div>
+
+    <h3>Most-mentioned entities</h3>
+    <p class="chart-caption" style="margin-bottom: 8px;">
+        Top entities (companies, agencies, people) mentioned in Wyoming coverage, ranked by
+        mention count.
+    </p>
+    <div class="hbars entities" id="wyEntities"></div>
+
+    <h3>County breakdown</h3>
+    <table class="data" id="wyCountiesTable">
+        <thead>
+            <tr>
+                <th>County</th>
+                <th class="num">Articles</th>
+                <th class="num">Avg sentiment</th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+
+    <h3>Most positive Wyoming coverage</h3>
+    <div class="article-list" id="wyTopPositive"></div>
+
+    <h3>Most negative Wyoming coverage</h3>
+    <div class="article-list" id="wyTopNegative"></div>
+</section>
+
+<section id="methodology">
+    <h2>Methodology</h2>
+    <dl class="method-grid">
+        <dt>What's tracked</dt>
+        <dd>News coverage of data-center development, operations, and opposition across the United States.</dd>
+
+        <dt>Data sources</dt>
+        <dd>
+            Primary ingestion is web search. A per-state sweep pipeline runs a fixed set of six
+            high-signal query templates against each of the 50 states plus DC (≈300 searches per
+            sweep), ensuring every state has recurring coverage rather than relying on whichever
+            stories a single query happens to surface. Web search results are deduplicated by URL
+            and passed through the same classification pipeline as RSS-sourced articles. A small
+            number of curated RSS feeds (primarily regional Wyoming, Texas, and Michigan outlets)
+            are also polled but currently contribute a minority of the corpus.
+        </dd>
+
+        <dt>Classification</dt>
+        <dd id="methodClassification"></dd>
+
+        <dt>Weighted Sentiment Index (WSI)</dt>
+        <dd id="methodWsi"></dd>
+
+        <dt>Confidence filter</dt>
+        <dd id="methodConfidence"></dd>
+
+        <dt>Reporting period</dt>
+        <dd id="methodDateRange"></dd>
+
+        <dt>Top 15 news sources in corpus</dt>
+        <dd><div class="source-grid" id="methodSources"></div></dd>
+    </dl>
+</section>
+
+<footer class="report-footer" id="reportFooter"></footer>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script>
 const DATA = {{REPORT_DATA}};
 
-function escapeHtml(s) {
-    if (s == null) return '';
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+// ─── Helpers ───────────────────────────────────────────
+function esc(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
-
-Chart.defaults.color = '#6b7280';
-Chart.defaults.borderColor = 'rgba(26,31,46,0.5)';
-Chart.defaults.font.family = "'Inter', sans-serif";
-Chart.defaults.font.size = 10;
-
-const ttCfg = { backgroundColor: '#0a0f1a', borderColor: '#14b8a6', borderWidth: 1, cornerRadius: 0,
-    titleFont: { family: "'JetBrains Mono'", size: 9 }, bodyFont: { family: "'JetBrains Mono'", size: 9 }, padding: 6 };
-
-function sColor(s) {
-    if (!s) return '#374151';
-    const t = Math.max(0, Math.min(1, (s - 1) / 4));
-    const stops = [[0,[239,68,68]],[0.25,[249,115,22]],[0.5,[234,179,8]],[0.75,[132,204,22]],[1,[34,197,94]]];
+function fmtNum(v, digits) {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    if (typeof v !== 'number') return String(v);
+    return v.toFixed(digits !== undefined ? digits : 2);
+}
+function fmtInt(v) {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    return Number(v).toLocaleString('en-US');
+}
+function fmtDateLong(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso.length <= 10 ? iso + 'T00:00:00' : iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+function fmtDateShort(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso.length <= 10 ? iso + 'T00:00:00' : iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+function directionPill(pc) {
+    if (!pc || !pc.direction) return '<span class="direction dir-flat">—</span>';
+    const d = pc.direction;
+    const cls = d === 'improving' ? 'dir-improving' : d === 'declining' ? 'dir-declining' : 'dir-flat';
+    const arrow = d === 'improving' ? '▲' : d === 'declining' ? '▼' : '◆';
+    let change = '';
+    if (pc.change !== null && pc.change !== undefined) {
+        change = ' ' + (pc.change > 0 ? '+' : '') + pc.change.toFixed(2);
+    }
+    return `<span class="direction ${cls}">${arrow} ${esc(d)}${change}</span>`;
+}
+function labelPill(label) {
+    const cls = 'lp-' + (label || 'neutral');
+    const pretty = (label || '').replace(/_/g, ' ');
+    return `<span class="label-pill ${cls}">${esc(pretty)}</span>`;
+}
+function wsiColor(v) {
+    if (v === null || v === undefined) return '#9ca3af';
+    const t = Math.max(0, Math.min(1, (v - 1) / 4));
+    const stops = [
+        [0.0, [220, 38, 38]],    // strongly negative
+        [0.25,[248, 113, 113]],
+        [0.5, [253, 224, 138]],  // neutral
+        [0.75,[74, 222, 128]],
+        [1.0, [21, 128, 61]]     // strongly positive
+    ];
     let i = 0;
-    while (i < stops.length - 1 && stops[i+1][0] < t) i++;
-    if (i >= stops.length - 1) return `rgb(${stops[stops.length-1][1].join(',')})`;
-    const [t0,c0] = stops[i], [t1,c1] = stops[i+1];
+    while (i < stops.length - 1 && stops[i + 1][0] < t) i++;
+    if (i >= stops.length - 1) {
+        const c = stops[stops.length - 1][1];
+        return `rgb(${c[0]},${c[1]},${c[2]})`;
+    }
+    const [t0, c0] = stops[i], [t1, c1] = stops[i + 1];
     const f = (t - t0) / (t1 - t0);
-    return `rgb(${Math.round(c0[0]+f*(c1[0]-c0[0]))},${Math.round(c0[1]+f*(c1[1]-c0[1]))},${Math.round(c0[2]+f*(c1[2]-c0[2]))})`;
+    const r = Math.round(c0[0] + f * (c1[0] - c0[0]));
+    const g = Math.round(c0[1] + f * (c1[1] - c0[1]));
+    const b = Math.round(c0[2] + f * (c1[2] - c0[2]));
+    return `rgb(${r},${g},${b})`;
 }
 
-function sPill(label) {
-    const cls = (label||'').includes('positive') ? 'pos' : (label||'').includes('negative') ? 'neg' : 'neut';
-    const map = { strongly_positive:'V.POS', slightly_positive:'POS', neutral:'NEU', slightly_negative:'NEG', strongly_negative:'V.NEG' };
-    return `<span class="pill pill-${cls}">${escapeHtml(map[label]||label||'--')}</span>`;
-}
+// Chart.js global defaults tuned for print-friendly light background
+Chart.defaults.color = '#374151';
+Chart.defaults.borderColor = 'rgba(229, 231, 235, 1)';
+Chart.defaults.font.family = "'Inter', sans-serif";
+Chart.defaults.font.size = 12;
 
-const topicNames = { energy_ratepayer:'Energy/Ratepayer', water:'Water', jobs_economic:'Jobs/Econ',
-    land_use_wildlife:'Land/Wildlife', regulation_transparency:'Regulation', tax_incentives:'Tax',
-    national_security_ai:'NatSec/AI', community_impact:'Community' };
+const tooltipBase = {
+    backgroundColor: '#111827',
+    borderColor: '#14b8a6',
+    borderWidth: 1,
+    cornerRadius: 4,
+    titleFont: { family: "'Inter'", size: 12, weight: 600 },
+    bodyFont: { family: "'JetBrains Mono'", size: 11 },
+    padding: 8
+};
 
-// State abbreviation: use 2-char uppercase of the state key as a reasonable default,
-// with special handling for multi-word states and known special values.
-const _stateAbbrMap = {"alabama":"AL","alaska":"AK","arizona":"AZ","arkansas":"AR","california":"CA","colorado":"CO","connecticut":"CT","delaware":"DE","florida":"FL","georgia":"GA","hawaii":"HI","idaho":"ID","illinois":"IL","indiana":"IN","iowa":"IA","kansas":"KS","kentucky":"KY","louisiana":"LA","maine":"ME","maryland":"MD","massachusetts":"MA","michigan":"MI","minnesota":"MN","mississippi":"MS","missouri":"MO","montana":"MT","nebraska":"NE","nevada":"NV","new hampshire":"NH","new jersey":"NJ","new mexico":"NM","new york":"NY","north carolina":"NC","north dakota":"ND","ohio":"OH","oklahoma":"OK","oregon":"OR","pennsylvania":"PA","rhode island":"RI","south carolina":"SC","south dakota":"SD","tennessee":"TN","texas":"TX","utah":"UT","vermont":"VT","virginia":"VA","washington":"WA","west virginia":"WV","wisconsin":"WI","wyoming":"WY","district of columbia":"DC","nationwide":"US"};
-const stateAbbr = new Proxy(_stateAbbrMap, { get: (t, k) => t[k] || (k||'').toUpperCase().substring(0,2) });
-const fmtDate = iso => iso ? new Date(iso).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '--';
+// ─── Executive Summary ────────────────────────────────
+(function renderSummary() {
+    const ov = DATA.overview || {};
+    const ranking = DATA.ranking || {};
+    const high = ranking.high_volume || [];
+    const leader = high[0];
 
-// Metrics
-const m = DATA.overview;
-const w = DATA.wsi;
-document.getElementById('metricsRow').innerHTML = [
-    ['Articles', m.total_articles],
-    ['Analyzed', m.analyzed_articles],
-    ['Avg', m.avg_sentiment !== null ? `<span style="color:${sColor(m.avg_sentiment)}">${m.avg_sentiment.toFixed(2)}</span>` : '--'],
-    ['WSI', w.current_wsi !== null ? `<span style="color:${sColor(w.current_wsi)}">${w.current_wsi.toFixed(2)}</span>` : '--'],
-    ['4wk Trend', w.period_comparison?.change !== null ? (() => {
-        const pc = w.period_comparison;
-        const arrow = pc.direction === 'improving' ? '\u25B2' : pc.direction === 'declining' ? '\u25BC' : '\u25C6';
-        const color = pc.direction === 'improving' ? 'var(--s5)' : pc.direction === 'declining' ? 'var(--s1)' : 'var(--s3)';
-        return `<span style="color:${color}">${arrow} ${pc.change > 0 ? '+' : ''}${pc.change.toFixed(2)}</span>`;
-    })() : '--'],
-].map(([l,v]) => `<div class="m-item"><span class="ml">${l}</span><span class="mv">${v}</span></div>`).join('');
+    let headline = 'Sentiment toward data-center development across the United States.';
+    if (leader) {
+        headline = `${leader.state_name} leads high-volume states in sentiment toward data-center development, with a Weighted Sentiment Index of ${fmtNum(leader.wsi)} across ${fmtInt(leader.articles)} analyzed articles.`;
+    }
+    document.getElementById('headlineBox').textContent = headline;
 
-// State cards
-if (w.by_state) {
-    document.getElementById('stateCards').innerHTML = Object.entries(w.by_state).map(([state, wsi]) => {
-        return `<div class="state-card" style="border-left:3px solid ${sColor(wsi)}">
-            <div class="sc-label">${escapeHtml(state.charAt(0).toUpperCase()+state.slice(1))}</div>
-            <div class="sc-value" style="color:${sColor(wsi)}">${wsi !== null ? wsi.toFixed(2) : '--'}</div>
-        </div>`;
-    }).join('');
-}
+    const dateRange = (ov.date_range_start && ov.date_range_end)
+        ? `${fmtDateLong(ov.date_range_start)} – ${fmtDateLong(ov.date_range_end)}`
+        : '—';
 
-// Trend (weekly WSI)
-if (DATA.trend.length > 0) {
-    const realTrend = DATA.trend.filter(t => t.wsi !== null);
-    if (realTrend.length > 0) {
-        new Chart(document.getElementById('trendChart'), {
+    const callouts = [
+        { label: 'Articles analyzed', value: fmtInt(ov.analyzed_articles), sub: ov.excluded_low_confidence ? `${fmtInt(ov.excluded_low_confidence)} excluded for low confidence` : '' },
+        { label: 'States covered', value: fmtInt(ov.states_covered), sub: `${fmtInt(ov.counties_covered)} counties` },
+        { label: 'Reporting period', value: dateRange, sub: '' },
+        { label: 'Overall WSI', value: fmtNum(ov.overall_wsi), sub: `${fmtNum(ov.avg_sentiment)} raw mean` }
+    ];
+    document.getElementById('calloutRow').innerHTML = callouts.map(c => `
+        <div class="callout">
+            <div class="clabel">${esc(c.label)}</div>
+            <div class="cvalue">${c.value}</div>
+            ${c.sub ? `<div class="csub">${esc(c.sub)}</div>` : ''}
+        </div>
+    `).join('');
+
+    document.getElementById('methodOneLiner').innerHTML =
+        `The <strong>Weighted Sentiment Index (WSI)</strong> is a rolling 1.0–5.0 score (3.0 = neutral) that tracks how each state's data-center coverage is trending right now. Per-article sentiment is bucketed by week, clustered by event so duplicate coverage of a single story doesn't over-count, and combined with a <strong>4-week exponential half-life</strong> so the score reflects the most recent month of reporting without throwing away prior context. Articles are gathered primarily via web-search sweeps — a fixed set of six query templates run against every state on a recurring basis — supplemented by a small number of curated regional RSS feeds, and each article is classified by Anthropic Claude (Haiku / Sonnet) for sentiment, topics, entities, and geography.`;
+})();
+
+// ─── State Ranking Tables ─────────────────────────────
+(function renderRanking() {
+    const ranking = DATA.ranking || {};
+    document.getElementById('thresholdLabel').textContent = String(ranking.threshold ?? 50);
+
+    function rowHtml(r) {
+        const pc = r.period_comparison || {};
+        const isWyoming = r.state_key === 'wyoming';
+        const trClass = isWyoming ? 'wyoming-row' : '';
+        return `<tr class="${trClass}">
+            <td>${esc(r.state_name)} <span style="color: var(--text-muted); font-family: var(--fm); font-size: 12px;">${esc(r.state_abbr)}</span></td>
+            <td class="num">${fmtInt(r.articles)}</td>
+            <td class="num" style="color: ${wsiColor(r.wsi)}; font-weight: 600;">${fmtNum(r.wsi)}</td>
+            <td class="num">${fmtNum(pc.current_4wk)}</td>
+            <td class="num">${fmtNum(pc.prior_4wk)}</td>
+            <td>${directionPill(pc)}</td>
+        </tr>`;
+    }
+
+    const highTbody = document.querySelector('#rankingTableHigh tbody');
+    const lowTbody = document.querySelector('#rankingTableLow tbody');
+    const high = ranking.high_volume || [];
+    const low = ranking.low_volume || [];
+    highTbody.innerHTML = high.length ? high.map(rowHtml).join('') :
+        '<tr><td colspan="6" class="no-data">No high-volume states in corpus.</td></tr>';
+    lowTbody.innerHTML = low.length ? low.map(rowHtml).join('') :
+        '<tr><td colspan="6" class="no-data">No low-volume states in corpus.</td></tr>';
+})();
+
+// ─── Overall Trend Chart ──────────────────────────────
+(function renderOverallTrend() {
+    const trend = DATA.trend_overall || [];
+    if (!trend.length) return;
+    const ctx = document.getElementById('overallTrendChart');
+    new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: trend.map(t => fmtDateShort(t.week)),
+            datasets: [
+                {
+                    label: 'WSI',
+                    data: trend.map(t => t.wsi),
+                    borderColor: '#14b8a6',
+                    backgroundColor: 'rgba(20, 184, 166, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.25,
+                    pointRadius: 3,
+                    pointBackgroundColor: '#14b8a6',
+                    fill: false,
+                    segment: {
+                        borderDash: ctx => trend[ctx.p1DataIndex]?.carried ? [4, 4] : []
+                    }
+                },
+                {
+                    label: 'Raw weekly mean',
+                    data: trend.map(t => t.raw),
+                    borderColor: 'rgba(156, 163, 175, 0.7)',
+                    borderDash: [2, 3],
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    fill: false,
+                    tension: 0.25
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { labels: { boxWidth: 16, font: { size: 12 } } },
+                tooltip: tooltipBase
+            },
+            scales: {
+                y: { min: 1, max: 5, ticks: { stepSize: 1 }, title: { display: true, text: 'WSI (1–5)', font: { size: 11 } }, grid: { color: 'rgba(229, 231, 235, 0.8)' } },
+                x: { grid: { display: false } }
+            }
+        }
+    });
+})();
+
+// ─── Wyoming Deep Dive ────────────────────────────────
+(function renderWyoming() {
+    const wy = DATA.wyoming || {};
+
+    document.getElementById('wyIntro').innerHTML =
+        `Wyoming's coverage consists of ${fmtInt(wy.articles)} analyzed articles with a current WSI of
+        <strong>${fmtNum(wy.wsi)}</strong> ${directionPill(wy.period_comparison)}.
+        The sections below show how that score decomposes across time, sentiment labels, topics,
+        entities, and geography.`;
+
+    // Trend overlay (Wyoming vs. US)
+    const wyTrend = wy.trend || [];
+    const overallTrend = DATA.trend_overall || [];
+    if (wyTrend.length) {
+        // Align by week
+        const overallMap = new Map(overallTrend.map(t => [t.week, t.wsi]));
+        const labels = wyTrend.map(t => fmtDateShort(t.week));
+        const wySeries = wyTrend.map(t => t.wsi);
+        const usSeries = wyTrend.map(t => overallMap.get(t.week) ?? null);
+        new Chart(document.getElementById('wyTrendChart'), {
             type: 'line',
-            data: { labels: DATA.trend.map(d => fmtDate(d.week)), datasets: [
-                { label: 'WSI', data: DATA.trend.map(d => d.wsi),
-                    borderColor: '#14b8a6', fill: false, tension: 0.2, pointRadius: 2, borderWidth: 2, pointBackgroundColor: '#14b8a6',
-                    segment: { borderDash: ctx => DATA.trend[ctx.p1DataIndex]?.carried ? [4,3] : [] } },
-                { label: 'Raw Avg', data: DATA.trend.map(d => d.raw),
-                    borderColor: 'rgba(107,114,128,0.5)', fill: false, tension: 0.2, pointRadius: 0, borderWidth: 1, borderDash: [2,2] }
-            ] },
-            options: { responsive: true, plugins: { legend: { display: true, labels: { boxWidth: 12, font: { size: 9 } } }, tooltip: ttCfg },
-                scales: { y: { min:1, max:5, grid: { color: 'rgba(26,31,46,0.5)' } }, x: { grid: { color: 'rgba(26,31,46,0.3)' } } } }
+            data: {
+                labels,
+                datasets: [
+                    {
+                        label: 'Wyoming WSI',
+                        data: wySeries,
+                        borderColor: '#14b8a6',
+                        backgroundColor: 'rgba(20, 184, 166, 0.12)',
+                        borderWidth: 2.5,
+                        tension: 0.25,
+                        pointRadius: 3,
+                        pointBackgroundColor: '#14b8a6',
+                        fill: false,
+                        segment: { borderDash: ctx => wyTrend[ctx.p1DataIndex]?.carried ? [4, 4] : [] }
+                    },
+                    {
+                        label: 'US overall WSI',
+                        data: usSeries,
+                        borderColor: 'rgba(156, 163, 175, 0.9)',
+                        borderDash: [4, 3],
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        fill: false,
+                        tension: 0.25
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { labels: { boxWidth: 16, font: { size: 12 } } },
+                    tooltip: tooltipBase
+                },
+                scales: {
+                    y: { min: 1, max: 5, ticks: { stepSize: 1 }, title: { display: true, text: 'WSI (1–5)', font: { size: 11 } }, grid: { color: 'rgba(229, 231, 235, 0.8)' } },
+                    x: { grid: { display: false } }
+                }
+            }
         });
     }
-}
 
-// Locations (all states)
-const locEntries = Object.entries(DATA.locations).filter(([k,v]) => v.avg !== null && v.count > 0);
-if (locEntries.length > 0) {
-    const labels = locEntries.map(([k,v]) => {
-        const [st,loc] = k.split(':');
-        return `${(stateAbbr[st]||st)} ${loc.replace(/_/g,' ')} (n=${v.count})`;
-    });
-    const vals = locEntries.map(([k,v]) => v.avg);
-    new Chart(document.getElementById('locationChart'), {
-        type: 'bar',
-        data: { labels, datasets: [{ data: vals, backgroundColor: vals.map(v => sColor(v)), borderRadius: 0 }] },
-        options: { responsive: true, plugins: { legend: { display: false }, tooltip: ttCfg },
-            scales: { y: { min:0, max:5, grid: { color: 'rgba(26,31,46,0.5)' } }, x: { grid: { display: false } } } }
-    });
-}
+    // Sentiment distribution stacked bar
+    const dist = wy.label_distribution || {};
+    const order = ['strongly_positive', 'slightly_positive', 'neutral', 'slightly_negative', 'strongly_negative'];
+    const total = order.reduce((sum, k) => sum + (dist[k] || 0), 0);
+    const bar = document.getElementById('wySentimentBar');
+    const legend = document.getElementById('wySentimentLegend');
+    const labelPretty = {
+        strongly_positive: 'Strongly positive',
+        slightly_positive: 'Slightly positive',
+        neutral: 'Neutral',
+        slightly_negative: 'Slightly negative',
+        strongly_negative: 'Strongly negative'
+    };
+    const swatchColor = {
+        strongly_positive: '#15803d',
+        slightly_positive: '#4ade80',
+        neutral: '#fde68a',
+        slightly_negative: '#f87171',
+        strongly_negative: '#b91c1c'
+    };
+    bar.innerHTML = order.map(k => {
+        const n = dist[k] || 0;
+        if (!total || !n) return '';
+        const pct = (n / total) * 100;
+        return `<div class="seg sb-${k}" style="flex: 0 0 ${pct}%; min-width: ${n ? '28px' : '0'};" title="${labelPretty[k]}: ${n}">${n}</div>`;
+    }).join('');
+    legend.innerHTML = order.map(k =>
+        `<span><span class="swatch" style="background: ${swatchColor[k]}"></span>${labelPretty[k]}: <strong>${dist[k] || 0}</strong></span>`
+    ).join('');
+    document.getElementById('wySentimentCaption').textContent =
+        total ? `${fmtInt(total)} analyzed Wyoming articles.` : 'No Wyoming articles available.';
 
-// Topics
-if (DATA.topics.length > 0) {
-    new Chart(document.getElementById('topicChart'), {
-        type: 'bar',
-        data: { labels: DATA.topics.map(t => topicNames[t.name]||t.name),
-            datasets: [{ data: DATA.topics.map(t=>t.count), backgroundColor: DATA.topics.map(t=>sColor(t.avg)), borderRadius: 0 }] },
-        options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false }, tooltip: ttCfg },
-            scales: { x: { ticks: { stepSize: 1 }, grid: { color: 'rgba(26,31,46,0.5)' } }, y: { grid: { display: false } } } }
-    });
-}
+    // Topics — horizontal bars
+    const topics = wy.topics || [];
+    const maxTopicCount = Math.max(1, ...topics.map(t => t.count));
+    const topicsEl = document.getElementById('wyTopics');
+    if (topics.length) {
+        const header = `<div class="hbar-header">
+            <div>Topic</div>
+            <div></div>
+            <div class="h-num">Articles</div>
+            <div class="h-wsi">Avg WSI</div>
+        </div>`;
+        const rows = topics.map(t => {
+            const pct = (t.count / maxTopicCount) * 100;
+            const color = wsiColor(t.avg);
+            return `<div class="hbar-row">
+                <div class="hbar-label">${esc(t.label)}</div>
+                <div class="hbar-track"><div class="hbar-fill" style="width: ${pct.toFixed(1)}%; background: ${color};"></div></div>
+                <div class="hbar-count">${t.count}</div>
+                <div class="hbar-wsi" style="color: ${color};">${fmtNum(t.avg)}</div>
+            </div>`;
+        }).join('');
+        topicsEl.innerHTML = header + rows;
+    } else {
+        topicsEl.innerHTML = '<div class="no-data">No topic data for Wyoming.</div>';
+    }
 
-// Articles
-const tbody = document.querySelector('#articlesTable tbody');
-if (DATA.articles.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="no-data">No articles</td></tr>';
-} else {
-    tbody.innerHTML = DATA.articles.map(a => `<tr>
-        <td class="title-cell">${escapeHtml(a.title)}</td>
-        <td>${escapeHtml(a.source)}</td>
-        <td>${fmtDate(a.date)}</td>
-        <td>${sPill(a.label)}</td>
-        <td>${escapeHtml(stateAbbr[a.state] || (a.state||'').toUpperCase())}</td>
-        <td>${escapeHtml((a.location||'').replace(/_/g,' '))}</td>
-    </tr>`).join('');
-}
+    // Entities
+    const entities = wy.entities || [];
+    const maxEntCount = Math.max(1, ...entities.map(e => e.count));
+    const entitiesEl = document.getElementById('wyEntities');
+    if (entities.length) {
+        const header = `<div class="hbar-header">
+            <div>Entity</div>
+            <div></div>
+            <div class="h-num">Mentions</div>
+        </div>`;
+        const rows = entities.map(e => {
+            const pct = (e.count / maxEntCount) * 100;
+            return `<div class="hbar-row">
+                <div class="hbar-label">${esc(e.name)}</div>
+                <div class="hbar-track"><div class="hbar-fill" style="width: ${pct.toFixed(1)}%; background: #14b8a6;"></div></div>
+                <div class="hbar-count">${e.count}</div>
+            </div>`;
+        }).join('');
+        entitiesEl.innerHTML = header + rows;
+    } else {
+        entitiesEl.innerHTML = '<div class="no-data">No entity data for Wyoming.</div>';
+    }
+
+    // Counties
+    const counties = wy.counties || [];
+    const countiesTbody = document.querySelector('#wyCountiesTable tbody');
+    countiesTbody.innerHTML = counties.length ? counties.map(c => `
+        <tr>
+            <td>${esc(c.county_name)}${c.fips ? ` <span style="color: var(--text-muted); font-family: var(--fm); font-size: 12px;">${esc(c.fips)}</span>` : ''}</td>
+            <td class="num">${fmtInt(c.count)}</td>
+            <td class="num" style="color: ${wsiColor(c.avg)};">${fmtNum(c.avg)}</td>
+        </tr>
+    `).join('') : '<tr><td colspan="3" class="no-data">No county-level Wyoming data.</td></tr>';
+
+    // Curated article lists
+    function articleItem(a) {
+        const href = a.url ? a.url : '#';
+        const titleHtml = a.url
+            ? `<a class="article-title" href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>`
+            : `<span class="article-title">${esc(a.title)}</span>`;
+        const scoreColor = wsiColor(a.sentiment_score);
+        return `<div class="article-item">
+            ${titleHtml}
+            <div class="article-meta">
+                <span>${esc(a.source || '—')}</span>
+                <span>·</span>
+                <span>${fmtDateLong(a.published_date)}</span>
+                <span>·</span>
+                <span class="score" style="color: ${scoreColor};">${fmtNum(a.sentiment_score)}</span>
+                ${labelPill(a.sentiment_label)}
+            </div>
+            ${a.key_claims_excerpt ? `<div class="article-claims">${esc(a.key_claims_excerpt)}</div>` : ''}
+        </div>`;
+    }
+    const tp = wy.top_positive || [];
+    const tn = wy.top_negative || [];
+    document.getElementById('wyTopPositive').innerHTML = tp.length
+        ? tp.map(articleItem).join('')
+        : '<div class="no-data">No Wyoming articles.</div>';
+    document.getElementById('wyTopNegative').innerHTML = tn.length
+        ? tn.map(articleItem).join('')
+        : '<div class="no-data">No Wyoming articles.</div>';
+})();
+
+// ─── Methodology ──────────────────────────────────────
+(function renderMethodology() {
+    const m = DATA.methodology || {};
+
+    document.getElementById('methodClassification').innerHTML =
+        `Each article is classified by <strong>${esc(m.classification_model || 'Claude Haiku')}</strong>
+        (with <strong>${esc(m.synthesis_model || 'Claude Sonnet')}</strong> for synthesis), emitting
+        a 1–5 sentiment score, a discrete sentiment label, topic tags, named entities, associated
+        US state / county geography, and key claims.`;
+
+    document.getElementById('methodWsi').innerHTML =
+        `Raw sentiment is bucketed by ISO week (Monday–Sunday). Within each week, articles that
+        share <strong>≥ ${m.wsi_cluster_entity_threshold ?? 2} named entities</strong> and were
+        published within <strong>${m.wsi_cluster_date_window_days ?? 3} days</strong> of each other are
+        clustered as a single event. Cluster sentiment is averaged, then each cluster is weighted
+        <em>log(n + 1)</em> so duplicate coverage of the same event has diminishing returns. Weekly
+        scores are then combined with a <strong>${m.wsi_half_life_weeks ?? 4}-week exponential
+        half-life decay</strong> over the last ${m.wsi_weeks_back ?? 26} weeks to produce the
+        current WSI. The scale is 1.0 (strongly negative) through 3.0 (neutral) to 5.0 (strongly
+        positive).`;
+
+    const total = m.total_articles ?? 0;
+    const analyzed = m.analyzed_articles ?? 0;
+    const excluded = m.excluded_low_confidence ?? 0;
+    const pct = total ? ((excluded / total) * 100).toFixed(1) : '0.0';
+    document.getElementById('methodConfidence').innerHTML =
+        `Articles are marked low-confidence when their full text could not be recovered from the
+        underlying publisher (a common outcome for Google News wrapper URLs). Low-confidence rows
+        are excluded from every number in this report. Of <strong>${fmtInt(total)}</strong>
+        total ingested articles, <strong>${fmtInt(analyzed)}</strong> passed the confidence filter
+        and <strong>${fmtInt(excluded)}</strong> (${pct}%) were excluded.`;
+
+    const dr = m.date_range || {};
+    document.getElementById('methodDateRange').textContent =
+        `${fmtDateLong(dr.start)} through ${fmtDateLong(dr.end)}.`;
+
+    const sources = m.sources || [];
+    const sg = document.getElementById('methodSources');
+    sg.innerHTML = sources.length ? sources.map(s => `
+        <div class="s-row"><span class="s-name">${esc(s.source)}</span><span class="s-count">${fmtInt(s.count)}</span></div>
+    `).join('') : '<div class="no-data">No source data.</div>';
+})();
+
+// ─── Footer ───────────────────────────────────────────
+document.getElementById('reportFooter').textContent =
+    `Prometheus Hyperscale · Data Center Sentiment Report · {{GENERATED_DATE}}`;
 </script>
+
 </body>
 </html>

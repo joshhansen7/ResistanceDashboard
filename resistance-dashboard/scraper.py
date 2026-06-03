@@ -9,6 +9,7 @@ import logging
 import re
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 import db
@@ -176,7 +177,7 @@ def resolve_google_news_url(url, interval=0.5, title=None, source=None):
     return url
 
 
-def scrape_url(url, timeout=15):
+def scrape_url(url, timeout=8):
     """
     Fetch and extract article text from a URL.
     Resolves Google News redirect URLs first.
@@ -184,8 +185,12 @@ def scrape_url(url, timeout=15):
     """
     try:
         import trafilatura
+        from trafilatura.settings import use_config
 
-        downloaded = trafilatura.fetch_url(url)
+        config = use_config()
+        config.set("DEFAULT", "DOWNLOAD_TIMEOUT", str(timeout))
+        config.set("DEFAULT", "MAX_REDIRECTS", "1")
+        downloaded = trafilatura.fetch_url(url, config=config)
         if not downloaded:
             logger.debug("No content downloaded from %s", url)
             return None
@@ -264,12 +269,47 @@ def scrape_article_metadata(url):
         return {"source": source_display, "url": resolved_url}
 
 
-def scrape_thin_articles(conn, limit=None, progress_callback=None, article_ids=None):
+def _scrape_thin_article(row):
+    url = row["url"]
+    title = row["title"]
+    source = row["source"]
+
+    resolved_url = row["resolved_url"] or url
+    if db.is_google_news_wrapper(url):
+        if not row["resolved_url"]:
+            return {
+                "id": row["id"],
+                "title": title,
+                "url": url,
+                "resolved_url": url,
+                "text": None,
+            }
+        resolved_url = resolve_google_news_url(url, title=title, source=source)
+        if resolved_url == url:
+            return {
+                "id": row["id"],
+                "title": title,
+                "url": url,
+                "resolved_url": resolved_url,
+                "text": None,
+            }
+
+    text = scrape_url(resolved_url)
+    return {
+        "id": row["id"],
+        "title": title,
+        "url": url,
+        "resolved_url": resolved_url,
+        "text": text,
+    }
+
+
+def scrape_thin_articles(conn, limit=None, progress_callback=None, article_ids=None, workers=8):
     """
     Find articles with thin full_text and attempt to scrape full content.
     Returns dict with summary stats.
     """
-    where = "analyzed = 0 AND url IS NOT NULL AND url != ''"
+    where = "analyzed = 0 AND url IS NOT NULL AND url != '' AND COALESCE(scrape_status, 'pending') = 'pending'"
     params = []
     if article_ids:
         placeholders = ",".join("?" * len(article_ids))
@@ -286,7 +326,11 @@ def scrape_thin_articles(conn, limit=None, progress_callback=None, article_ids=N
     rows = conn.execute(sql, params).fetchall()
 
     # Filter to thin content
-    thin = [r for r in rows if (r["content_quality"] or db.classify_content_quality(r["full_text"])) == "thin"]
+    thin = [
+        dict(r)
+        for r in rows
+        if (r["content_quality"] or db.classify_content_quality(r["full_text"])) == "thin"
+    ]
 
     if not thin:
         logger.info("No thin articles to scrape")
@@ -299,47 +343,46 @@ def scrape_thin_articles(conn, limit=None, progress_callback=None, article_ids=N
     if progress_callback:
         progress_callback(0, len(thin))
 
-    for i, row in enumerate(thin):
-        url = row["url"]
-        title = row["title"]
-        source = row["source"]
+    workers = max(1, int(workers or 1))
+    logger.info("Scraping thin content with %d workers", workers)
 
-        if progress_callback:
-            progress_callback(i + 1, len(thin))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_scrape_thin_article, row) for row in thin]
+        for i, future in enumerate(as_completed(futures), start=1):
+            result = future.result()
+            url = result["url"]
+            resolved_url = result["resolved_url"]
+            text = result["text"]
+            title = result["title"]
 
-        logger.info("Scraping [%d/%d]: %s", i + 1, len(thin), title[:60])
+            if progress_callback:
+                progress_callback(i, len(thin))
 
-        resolved_url = row["resolved_url"] or url
-        if db.is_google_news_wrapper(url):
-            resolved_url = resolve_google_news_url(url, title=title, source=source)
+            logger.info("Scraped [%d/%d]: %s", i, len(thin), title[:60])
             if resolved_url != url:
                 logger.info("  -> Resolved URL: %s", resolved_url[:80])
 
-        text = scrape_url(resolved_url)
-        if text:
-            _record_scrape_attempt(
-                conn,
-                row["id"],
-                "scraped",
-                resolved_url=resolved_url if resolved_url != url else None,
-                full_text=text,
-            )
-            conn.commit()
-            scraped += 1
-            logger.info("  -> Got %d chars", len(text))
-        else:
-            _record_scrape_attempt(
-                conn,
-                row["id"],
-                "resolved_only" if resolved_url != url else "failed",
-                resolved_url=resolved_url if resolved_url != url else None,
-            )
-            conn.commit()
-            failed += 1
-            logger.info("  -> Failed to scrape")
+            if text:
+                _record_scrape_attempt(
+                    conn,
+                    result["id"],
+                    "scraped",
+                    resolved_url=resolved_url if resolved_url != url else None,
+                    full_text=text,
+                )
+                scraped += 1
+                logger.info("  -> Got %d chars", len(text))
+            else:
+                _record_scrape_attempt(
+                    conn,
+                    result["id"],
+                    "resolved_only" if resolved_url != url else "failed",
+                    resolved_url=resolved_url if resolved_url != url else None,
+                )
+                failed += 1
+                logger.info("  -> Failed to scrape")
 
-        # Brief pause between requests
-        time.sleep(0.5)
+            conn.commit()
 
     return {
         "scraped": scraped,

@@ -271,14 +271,8 @@ nationwide:
 priority_states:
   wyoming:
     feeds:
-      - name: "Casper Star-Tribune"
-        url: "https://trib.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc"
-        enabled: true
       - name: "WyoFile"
         url: "https://wyofile.com/feed/"
-        enabled: true
-      - name: "Wyoming Tribune Eagle"
-        url: "https://www.wyomingnews.com/search/?f=rss&t=article&l=25&s=start_time&sd=desc"
         enabled: true
       - name: "Wyoming Public Media"
         url: "https://www.wyomingpublicmedia.org/rss.xml"

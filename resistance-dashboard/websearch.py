@@ -13,6 +13,7 @@ import logging
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -34,6 +35,20 @@ USER_AGENT = "PrometheusDashboard/1.0 (News Research; +https://github.com/promet
 DEFAULT_QUERY = '"data center"'
 
 SWEEP_PROGRESS_PATH = Path(__file__).parent / "data" / "sweep_progress.json"
+
+TRUSTED_PROMETHEUS_SOURCES = {
+    "business wire",
+    "businesswire.com",
+    "cowboy state daily",
+    "data center dynamics",
+    "data centre dynamics",
+    "dcd",
+    "pr newswire",
+    "prnewswire.com",
+    "the wall street journal",
+    "wall street journal",
+    "wsj",
+}
 
 
 # ── Progress tracking (for per-state sweep mode) ────────────────────
@@ -130,6 +145,50 @@ def _resolve_article_url(article, resolved_cache, existing_urls):
         logger.debug("Resolved URL duplicate skipped: %s", final_url[:80])
         return None
     return final_url
+
+
+def _summary_is_title_only(article):
+    """Return True when Google News only gives us a title/source stub."""
+    title_norm = normalize_for_comparison(article.get("title") or "")
+    summary_norm = normalize_for_comparison(article.get("summary") or "")
+    source_norm = normalize_for_comparison(article.get("source") or "")
+    if not title_norm or not summary_norm:
+        return True
+    summary_without_source = summary_norm.replace(source_norm, "").strip()
+    return (
+        summary_norm == title_norm
+        or summary_without_source == title_norm
+        or (summary_norm.startswith(title_norm) and len(summary_norm) <= len(title_norm) + len(source_norm) + 8)
+    )
+
+
+def _manual_review_reason(article, final_url=None):
+    """
+    Return a reason when a high-relevance article should not be auto-approved.
+
+    Relevance scoring answers "is this on topic?" It does not verify whether a
+    thin websearch row is making a true project/company claim.
+    """
+    title_summary = normalize_for_comparison(
+        f"{article.get('title') or ''} {article.get('summary') or ''}"
+    )
+    source_norm = normalize_for_comparison(article.get("source") or "")
+    final_url_norm = normalize_for_comparison(final_url or "")
+
+    mentions_prometheus_hyperscale = "prometheus hyperscale" in title_summary
+    trusted_prometheus_source = any(
+        trusted in source_norm or trusted in final_url_norm
+        for trusted in TRUSTED_PROMETHEUS_SOURCES
+    )
+    if mentions_prometheus_hyperscale and (
+        not trusted_prometheus_source or _summary_is_title_only(article)
+    ):
+        return (
+            "Manual review required: Prometheus Hyperscale claim from a thin "
+            "or untrusted websearch source."
+        )
+
+    return None
 
 
 # ── Main search function ─────────────────────────────────────────────
@@ -407,38 +466,41 @@ def run_websearch(query=None, days_back=30, state=None,
         api_key_set = client is not None
         scored = 0
         auto_approved = 0
-        try:
-            import local_llm
-            local_ready = local_llm.ensure_running()
-        except Exception as e:
-            logger.debug("Local LLM unavailable: %s", e)
+        if per_state:
             local_ready = False
+        else:
+            try:
+                import local_llm
+                local_ready = local_llm.ensure_running()
+            except Exception as e:
+                logger.debug("Local LLM unavailable: %s", e)
+                local_ready = False
 
-        for article in matched_articles:
-            if progress_callback is not None:
-                progress_callback({
-                    "phase": "scoring",
-                    "current": scored + 1,
-                    "total": len(matched_articles),
-                    "state": article.get("state"),
-                    "title": article.get("title"),
-                })
+        def score_article(article):
             rel_score, rel_reason = score_relevance_hybrid(
                 article, client, relevance_model, local_ready=local_ready,
             )
+            return article, rel_score, rel_reason
+
+        def persist_scored_article(article, rel_score, rel_reason):
+            nonlocal scored, auto_approved
             if rel_score is not None:
                 article["relevance_score"] = rel_score
                 article["relevance_reason"] = rel_reason
                 scored += 1
-                if not local_ready:
-                    time.sleep(0.1)
 
                 # Auto-approve if above threshold
                 if auto_threshold and rel_score >= auto_threshold:
                     original_url = article["url"]
-                    final_url = _resolve_article_url(article, resolved_url_cache, existing_urls)
-                    if not final_url:
-                        continue
+                    review_reason = _manual_review_reason(article)
+                    if review_reason:
+                        article["relevance_reason"] = f"{rel_reason or ''} {review_reason}".strip()
+                        logger.info("Manual review required: %s", article["title"][:60])
+                        article["search_id"] = search_id
+                        article["source_type"] = "websearch"
+                        db.insert_pending_article(conn, article)
+                        return
+                    final_url = original_url
                     article_data = {
                         "source": article["source"],
                         "source_type": "websearch",
@@ -451,19 +513,18 @@ def run_websearch(query=None, days_back=30, state=None,
                         "keyword_score": article["keyword_score"],
                         "state": article["state"],
                         "location_relevance": article["location_relevance"],
-                        "resolved_url": final_url if final_url != original_url else None,
                     }
                     result = db.insert_article(conn, article_data)
                     if result is not None:
                         auto_approved += 1
                         existing_urls.add(final_url)
                         logger.info("Auto-approved: %s (rel=%d)", article["title"][:60], rel_score)
-                    continue
+                    return
 
                 # Auto-reject if below threshold
                 if reject_threshold and rel_score <= reject_threshold:
                     logger.debug("Auto-rejected: %s (rel=%d)", article["title"][:60], rel_score)
-                    continue
+                    return
             else:
                 article["relevance_score"] = None
                 article["relevance_reason"] = None
@@ -474,6 +535,35 @@ def run_websearch(query=None, days_back=30, state=None,
             article["search_id"] = search_id
             article["source_type"] = "websearch"
             db.insert_pending_article(conn, article)
+
+        if per_state and not local_ready and matched_articles:
+            workers = max(1, int(pipeline.get("relevance_workers", 6)))
+            logger.info("Scoring %d articles with %d workers", len(matched_articles), workers)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(score_article, article) for article in matched_articles]
+                for current, future in enumerate(as_completed(futures), start=1):
+                    article, rel_score, rel_reason = future.result()
+                    if progress_callback is not None:
+                        progress_callback({
+                            "phase": "scoring",
+                            "current": current,
+                            "total": len(matched_articles),
+                            "state": article.get("state"),
+                            "title": article.get("title"),
+                        })
+                    persist_scored_article(article, rel_score, rel_reason)
+        else:
+            for article in matched_articles:
+                if progress_callback is not None:
+                    progress_callback({
+                        "phase": "scoring",
+                        "current": scored + 1,
+                        "total": len(matched_articles),
+                        "state": article.get("state"),
+                        "title": article.get("title"),
+                    })
+                article, rel_score, rel_reason = score_article(article)
+                persist_scored_article(article, rel_score, rel_reason)
 
         db.insert_feed_run(conn, "Web Search" + (" (sweep)" if per_state else ""),
                           total_results, keyword_matches, "success")

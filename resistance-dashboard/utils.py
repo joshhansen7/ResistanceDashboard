@@ -33,6 +33,18 @@ def parse_json_response(text):
         logger.warning("Expected JSON object, got %s", type(result).__name__)
         return None
     except (json.JSONDecodeError, ValueError, TypeError) as e:
+        decoder = json.JSONDecoder()
+        start = text.find("{")
+        while start != -1:
+            try:
+                result, _ = decoder.raw_decode(text[start:])
+                if isinstance(result, dict):
+                    return result
+                logger.warning("Expected JSON object, got %s", type(result).__name__)
+                return None
+            except json.JSONDecodeError:
+                start = text.find("{", start + 1)
+
         logger.warning("Failed to parse JSON response: %s", e)
         logger.debug("Raw response: %s", text[:500])
         return None
