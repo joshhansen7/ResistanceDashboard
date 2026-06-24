@@ -11,6 +11,8 @@ Usage:
   python resistance_dashboard.py status          Show database stats
   python resistance_dashboard.py run             Full pipeline: ingest → analyze → digest (if due)
   python resistance_dashboard.py manual          Launch manual input tool
+  python resistance_dashboard.py infill          Resolve Google News URLs (gradual) + scrape thin content
+  python resistance_dashboard.py infill --upgrade  Also re-scrape + reanalyze recent low-confidence articles
   python resistance_dashboard.py backfill        Ingest + analyze all, generate baseline digest
   python resistance_dashboard.py sweep           Per-state sweep: search all 50 states systematically
   python resistance_dashboard.py sweep --days 30 --state ohio
@@ -190,6 +192,72 @@ def cmd_manual(args):
     manual_input.run_manual_input()
 
 
+def cmd_infill(args):
+    """Resolve Google News URLs gradually and scrape thin article content.
+
+    Designed for a daily cron on a persistent host: it chips away at the Google
+    News URL backlog at a rate-limit-safe pace, then scrapes any thin articles to
+    fill in full text. Optionally also upgrades recent low-confidence articles
+    (this re-runs analysis and uses the Anthropic API).
+    """
+    import scraper
+    from shared import load_config
+
+    print(f"\n🧩 {APP_NAME} — Article Infill")
+    print("=" * 35)
+
+    config = load_config() or {}
+    infill_cfg = config.get("infill", {}) if isinstance(config, dict) else {}
+
+    resolve_limit = args.resolve_limit if args.resolve_limit is not None \
+        else infill_cfg.get("resolve_limit_per_run", 50)
+    interval = args.interval if args.interval is not None \
+        else infill_cfg.get("interval_seconds", 2.0)
+    backoff = infill_cfg.get("rate_limit_backoff_seconds", 60.0)
+    max_rate_limit_hits = infill_cfg.get("max_rate_limit_hits", 3)
+    workers = infill_cfg.get("scrape_workers", 4)
+
+    print(f"  Resolving up to {resolve_limit} Google News URLs (interval {interval}s)...")
+    result = scraper.infill_articles(
+        resolve_limit=resolve_limit,
+        scrape_limit=args.scrape_limit,
+        interval=interval,
+        backoff=backoff,
+        max_rate_limit_hits=max_rate_limit_hits,
+        workers=workers,
+        do_scrape=not args.no_scrape,
+    )
+
+    r = result.get("resolve", {})
+    s = result.get("scrape", {})
+    print("\nResolve:")
+    print(f"  Candidates:   {r.get('candidates', 0)}")
+    print(f"  Resolved:     {r.get('resolved', 0)}")
+    print(f"  Unresolved:   {r.get('unresolved', 0)}")
+    if r.get("stopped_early"):
+        print("  Note: stopped early on sustained rate limiting — resumes next run.")
+    print("Scrape:")
+    print(f"  Scraped:      {s.get('scraped', 0)}")
+    print(f"  Failed:       {s.get('failed', 0)}")
+
+    if getattr(args, "upgrade", False):
+        print("\n--- Upgrading recent low-confidence articles (uses API) ---")
+        conn = db.get_connection()
+        try:
+            up = scraper.upgrade_recent_low_confidence_articles(
+                conn,
+                days_back=args.upgrade_days,
+                limit=args.upgrade_limit,
+            )
+        finally:
+            conn.close()
+        print(f"  Candidates:   {up.get('candidates', 0)}")
+        print(f"  Upgraded:     {up.get('upgraded', 0)}")
+        print(f"  Reanalyzed:   {up.get('reanalyzed', 0)}")
+
+    print("\n✅ Infill complete!")
+
+
 def cmd_backfill(args):
     """Backfill: ingest + analyze all + generate baseline digest."""
     print(f"\n📦 {APP_NAME} — Backfill Mode")
@@ -343,6 +411,40 @@ def main():
     dash_parser.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
     dash_parser.add_argument("--port", default=5000, type=int, help="Port (default: 5000)")
 
+    # infill
+    infill_parser = subparsers.add_parser(
+        "infill",
+        help="Gradually resolve Google News URLs + scrape thin content (cron-friendly)",
+    )
+    infill_parser.add_argument(
+        "--resolve-limit", dest="resolve_limit", type=int, default=None,
+        help="Max Google News URLs to resolve this run (default: config or 50)",
+    )
+    infill_parser.add_argument(
+        "--scrape-limit", dest="scrape_limit", type=int, default=None,
+        help="Max thin articles to scrape this run (default: all)",
+    )
+    infill_parser.add_argument(
+        "--interval", dest="interval", type=float, default=None,
+        help="Seconds to wait between Google News resolutions (default: config or 2.0)",
+    )
+    infill_parser.add_argument(
+        "--no-scrape", dest="no_scrape", action="store_true",
+        help="Only resolve URLs; skip the thin-content scrape pass",
+    )
+    infill_parser.add_argument(
+        "--upgrade", dest="upgrade", action="store_true",
+        help="Also re-scrape + reanalyze recent low-confidence articles (uses API)",
+    )
+    infill_parser.add_argument(
+        "--upgrade-days", dest="upgrade_days", type=int, default=30,
+        help="Look-back window in days for --upgrade (default: 30)",
+    )
+    infill_parser.add_argument(
+        "--upgrade-limit", dest="upgrade_limit", type=int, default=100,
+        help="Max articles to upgrade with --upgrade (default: 100)",
+    )
+
     # backfill
     subparsers.add_parser("backfill", help="Ingest + analyze all + baseline digest")
 
@@ -420,6 +522,7 @@ def main():
         "run": cmd_run,
         "dashboard": cmd_dashboard,
         "manual": cmd_manual,
+        "infill": cmd_infill,
         "backfill": cmd_backfill,
         "sweep": cmd_sweep,
         "historical-backfill": cmd_historical_backfill,

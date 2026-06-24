@@ -78,29 +78,37 @@ def _try_base64_decode(url):
     return None
 
 
-def _try_gnewsdecoder(url, interval=0.5):
+def _gnewsdecode_with_status(url, interval=0.5):
     """
     Use the googlenewsdecoder package to resolve newer-format Google News URLs.
     This makes 2 HTTP requests to Google's batchexecute endpoint.
-    Returns the real URL or None.
+    Returns a (decoded_url_or_None, rate_limited) tuple so paced callers can
+    back off when Google returns HTTP 429.
     """
     try:
         from googlenewsdecoder import gnewsdecoder
 
         result = gnewsdecoder(url, interval=interval)
         if result.get("status"):
-            return result["decoded_url"]
-        else:
-            msg = result.get("message", "")
-            if "429" in msg:
-                logger.debug("gnewsdecoder: Google rate limit (429)")
-            else:
-                logger.debug("gnewsdecoder failed: %s", msg)
+            return result["decoded_url"], False
+        msg = result.get("message", "") or ""
+        if "429" in msg or "rate" in msg.lower():
+            logger.debug("gnewsdecoder: Google rate limit (429)")
+            return None, True
+        logger.debug("gnewsdecoder failed: %s", msg)
     except ImportError:
         logger.warning("googlenewsdecoder not installed — run: pip install googlenewsdecoder")
     except Exception as e:
+        if "429" in str(e):
+            return None, True
         logger.debug("gnewsdecoder error: %s", e)
-    return None
+    return None, False
+
+
+def _try_gnewsdecoder(url, interval=0.5):
+    """Backward-compatible wrapper returning just the decoded URL (or None)."""
+    decoded, _ = _gnewsdecode_with_status(url, interval=interval)
+    return decoded
 
 
 def _try_title_search(title, source=None):
@@ -568,3 +576,156 @@ def upgrade_recent_low_confidence_articles(
         "not_improved": not_improved,
         "reanalyzed": reanalyzed,
     }
+
+
+def gradual_resolve_google_news(
+    conn,
+    limit=50,
+    interval=2.0,
+    backoff=60.0,
+    max_rate_limit_hits=3,
+    progress_callback=None,
+):
+    """
+    Resolve pending Google News wrapper URLs to their real article URLs, one at a
+    time and *paced* to avoid Google's rate limiter (HTTP 429).
+
+    Designed to run unattended once per day on a persistent host: it chews through
+    a bounded slice of the backlog each run, backs off exponentially when Google
+    starts rate-limiting, and stops early after `max_rate_limit_hits` sustained
+    429s so the remaining URLs are simply picked up on the next daily run.
+
+    Only `resolved_url` is written here (never `scrape_status`), so the article
+    stays eligible for the scrape pass that follows.
+    """
+    sql = """
+    SELECT id, url, title, source FROM articles
+    WHERE url LIKE ?
+      AND (resolved_url IS NULL OR resolved_url = '' OR resolved_url = url)
+    ORDER BY COALESCE(published_date, ingested_date) DESC
+    """
+    params = [db.LOW_CONFIDENCE_URL_PATTERN]
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    rows = conn.execute(sql, params).fetchall()
+
+    stats = {
+        "candidates": len(rows),
+        "resolved": 0,
+        "unresolved": 0,
+        "rate_limited": False,
+        "stopped_early": False,
+    }
+    if not rows:
+        logger.info("No pending Google News URLs to resolve")
+        return stats
+
+    logger.info(
+        "Gradually resolving up to %d Google News URLs (interval=%.1fs, backoff=%.0fs)",
+        len(rows), interval, backoff,
+    )
+
+    consecutive_rate_limits = 0
+    current_backoff = backoff
+    for i, row in enumerate(rows):
+        if progress_callback:
+            progress_callback({"phase": "resolving", "current": i + 1, "total": len(rows)})
+
+        url = row["url"]
+
+        # Layer 1: free offline base64 decode (no network, never rate-limited)
+        decoded = _try_base64_decode(url)
+        rate_limited = False
+        if not decoded:
+            decoded, rate_limited = _gnewsdecode_with_status(url, interval=0.5)
+        if not decoded and row["title"]:
+            decoded = _try_title_search(row["title"], row["source"])
+
+        if decoded and decoded != url:
+            conn.execute(
+                "UPDATE articles SET resolved_url = ? WHERE id = ?",
+                (decoded, row["id"]),
+            )
+            conn.commit()
+            stats["resolved"] += 1
+            consecutive_rate_limits = 0
+            current_backoff = backoff
+            logger.info("Resolved [%d/%d]: %s", i + 1, len(rows), decoded[:80])
+        else:
+            stats["unresolved"] += 1
+            if rate_limited:
+                stats["rate_limited"] = True
+                consecutive_rate_limits += 1
+                logger.warning(
+                    "Google rate limit (%d/%d consecutive) — backing off %.0fs",
+                    consecutive_rate_limits, max_rate_limit_hits, current_backoff,
+                )
+                if consecutive_rate_limits >= max_rate_limit_hits:
+                    logger.warning(
+                        "Sustained rate limiting — stopping; remaining URLs resume next run"
+                    )
+                    stats["stopped_early"] = True
+                    break
+                time.sleep(current_backoff)
+                current_backoff = min(current_backoff * 2, 600)
+                continue
+
+        time.sleep(interval)
+
+    logger.info(
+        "Gradual resolve done: %d resolved, %d unresolved of %d candidates%s",
+        stats["resolved"], stats["unresolved"], stats["candidates"],
+        " (stopped early on rate limit)" if stats["stopped_early"] else "",
+    )
+    return stats
+
+
+def infill_articles(
+    db_path=None,
+    resolve_limit=50,
+    scrape_limit=None,
+    interval=2.0,
+    backoff=60.0,
+    max_rate_limit_hits=3,
+    workers=4,
+    do_scrape=True,
+    progress_callback=None,
+):
+    """
+    Daily 'infill' pass for a persistent host. Two phases:
+
+      1. Gradually resolve a bounded slice of the Google News URL backlog to real
+         URLs (paced + 429 backoff). Chips away at the backlog a little each day.
+      2. Scrape thin-content articles to fill in full_text (uses freshly resolved
+         URLs from phase 1).
+
+    Safe to run unattended once per day via cron. Returns combined stats.
+    """
+    conn = db.get_connection(db_path)
+    try:
+        resolve_stats = gradual_resolve_google_news(
+            conn,
+            limit=resolve_limit,
+            interval=interval,
+            backoff=backoff,
+            max_rate_limit_hits=max_rate_limit_hits,
+            progress_callback=progress_callback,
+        )
+
+        scrape_stats = {"scraped": 0, "failed": 0, "skipped": 0}
+        if do_scrape:
+            scrape_stats = scrape_thin_articles(
+                conn,
+                limit=scrape_limit,
+                workers=workers,
+                progress_callback=(
+                    lambda current, total: progress_callback(
+                        {"phase": "scraping", "current": current, "total": total}
+                    )
+                ) if progress_callback else None,
+            )
+    finally:
+        conn.close()
+
+    return {"resolve": resolve_stats, "scrape": scrape_stats}

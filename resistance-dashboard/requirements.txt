@@ -4,3 +4,4 @@ pyyaml>=6.0
 anthropic>=0.39
 flask>=3.0
 trafilatura>=1.6
+googlenewsdecoder>=0.1.7

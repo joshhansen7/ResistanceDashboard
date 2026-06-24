@@ -415,6 +415,17 @@ anthropic:
   timeout_seconds: 30
 
 # ──────────────────────────────────────────────
+# Article infill (gradual Google News resolution + thin-content scrape)
+# Used by the `infill` command, intended to run daily on a persistent host.
+# ──────────────────────────────────────────────
+infill:
+  resolve_limit_per_run: 50          # Google News URLs to resolve per daily run
+  interval_seconds: 2.0              # pause between resolutions (rate-limit safety)
+  rate_limit_backoff_seconds: 60     # initial backoff when Google returns 429
+  max_rate_limit_hits: 3             # stop early after this many sustained 429s
+  scrape_workers: 4                  # threads for the thin-content scrape pass
+
+# ──────────────────────────────────────────────
 # Digest settings
 # ──────────────────────────────────────────────
 digest:
