@@ -21,7 +21,7 @@ import analyze
 from ingest import check_keyword_match, detect_location, _score_relevance
 from shared import load_config, get_anthropic_client
 from utils import clean_html, normalize_for_comparison
-from websearch import _extract_source_from_title, _check_title_similarity
+from websearch import _extract_source_from_title, _check_title_similarity, _title_signature
 
 logger = logging.getLogger("resistance_dashboard.historical_backfill")
 
@@ -99,14 +99,17 @@ def run_historical_backfill(start_date="2025-09-01", end_date=None,
     db.init_db()
     conn = db.get_connection()
 
-    # Load existing titles for dedup
-    existing_titles = [
-        r["title"] for r in conn.execute("SELECT title FROM articles").fetchall()
-    ] + [
-        r["title"]
-        for r in conn.execute(
+    # Load existing title signatures for dedup
+    _existing_title_rows = (
+        conn.execute("SELECT title FROM articles").fetchall()
+        + conn.execute(
             "SELECT title FROM pending_articles WHERE status = 'pending'"
         ).fetchall()
+    )
+    existing_title_signatures = [
+        sig
+        for sig in (_title_signature(r["title"]) for r in _existing_title_rows)
+        if sig is not None
     ]
 
     # Build query plan: (state_key, query_string) pairs
@@ -224,11 +227,13 @@ def run_historical_backfill(start_date="2025-09-01", end_date=None,
                         continue
 
                 # Title similarity dedup
-                is_dup, _ = _check_title_similarity(title, existing_titles)
+                is_dup, _ = _check_title_similarity(title, existing_title_signatures)
                 if is_dup:
                     total_skipped_title += 1
                     continue
-                existing_titles.append(title)
+                signature = _title_signature(title)
+                if signature is not None:
+                    existing_title_signatures.append(signature)
 
                 # Keyword matching
                 keywords, score, matched_state = check_keyword_match(
