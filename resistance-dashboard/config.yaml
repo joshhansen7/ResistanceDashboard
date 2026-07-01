@@ -220,72 +220,34 @@ nationwide:
     - '"data center" energy OR power OR grid'
     - '"data center" tax OR incentive OR zoning'
 
-  # ── Nationwide web search queries ──
-  # Organized in tiers: core discovery, company/project, regional, thematic
-  web_search_queries:
-    # Core discovery (high-signal, broad sweep)
-    - '"data center" construction OR development OR proposed'
+  # ── Nationwide thematic pass (each run ONCE, with NO state suffix) ──
+  # High-signal company / national queries that catch stories which don't name a
+  # state in the headline (e.g. a national Stargate or xAI announcement). State
+  # is attributed afterward via text inference (geo.infer_state_from_text).
+  # These run once per sweep — NOT once per state — so the list can stay broad
+  # without multiplying the query budget.
+  thematic_queries:
     - '"data center" opposition OR moratorium OR ban OR protest'
-    - '"data center" zoning OR rezoning OR permit OR approved'
-    - '"data center" electricity OR power OR grid OR demand'
-    - '"data center" water OR cooling OR drought'
+    - '"data center" "interconnection queue" OR FERC OR PJM OR "grid capacity"'
     - '"data center" ratepayer OR "rate increase" OR "electricity bill"'
-    - '"data center" "tax incentive" OR "tax abatement" OR subsidy'
-    - '"data center" noise OR pollution OR "community impact"'
     - '"data center" nuclear OR SMR OR "small modular reactor"'
-    - '"hyperscale" data center OR campus'
-    - '"AI data center" OR "AI infrastructure" OR "AI factory"'
-    # Company / project specific
+    - '"data center" "environmental justice" OR "Clean Air Act" OR emissions'
+    - '"data center" legislation OR bill OR moratorium 2026'
     - '"Stargate" data center OR OpenAI OR SoftBank'
     - 'xAI data center OR Colossus OR supercomputer'
     - 'Anthropic data center OR infrastructure'
-    - 'Meta Hyperion OR "Meta data center"'
-    - 'Microsoft "data center" OR "AI superfactory"'
-    - 'Amazon "data center" OR "Project Rainier"'
-    - 'Google "data center" OR "Kairos Power"'
-    - 'Equinix OR "Digital Realty" data center'
-    - 'QTS OR CyrusOne OR Vantage data center'
-    - '"Compass Datacenters" OR "Applied Digital" OR "Core Scientific"'
-    - 'Crusoe Energy data center'
-    - '"Constellation Energy" OR Vistra OR "Talen Energy" "data center"'
-    # Regional sweeps
-    - '"Northern Virginia" OR "Loudoun County" OR "Prince William County" data center'
-    - '"data center" Texas OR ERCOT'
-    - '"data center" Ohio OR Columbus OR "New Albany"'
-    - '"data center" Georgia OR Atlanta'
-    - '"data center" Louisiana OR Mississippi'
-    - '"data center" Indiana OR Wisconsin'
-    - '"data center" Arizona OR Phoenix OR "North Carolina"'
-    # Thematic / issue
-    - '"data center" "environmental justice" OR "Clean Air Act" OR emissions'
-    - '"data center" legislation OR bill OR moratorium 2026'
-    - '"data center" "interconnection queue" OR "grid capacity" OR FERC OR PJM'
-    - '"data center" "behind the meter" OR colocation power nuclear'
+    - 'Meta OR Microsoft OR Amazon OR Google "data center" campus'
+    - '"AI data center" OR "AI infrastructure" OR "AI factory"'
     - 'Prometheus Hyperscale'
 
 
 # ══════════════════════════════════════════════════
-# Priority states — deep monitoring with RSS feeds
-# and specific location tracking
+# Priority states — deep monitoring with state-specific
+# keyword and location tracking (used by relevance scoring
+# and state attribution; searches use the unified sweep)
 # ══════════════════════════════════════════════════
 priority_states:
   wyoming:
-    feeds:
-      - name: "WyoFile"
-        url: "https://wyofile.com/feed/"
-        enabled: true
-      - name: "Wyoming Public Media"
-        url: "https://www.wyomingpublicmedia.org/rss.xml"
-        enabled: true
-      - name: "Oil City News"
-        url: "https://oilcity.news/feed/"
-        enabled: true
-      - name: "SweetwaterNOW"
-        url: "https://sweetwaternow.com/feed/"
-        enabled: true
-      - name: "Cowboy State Daily"
-        url: ""
-        enabled: false  # No public RSS; add articles manually
     keywords:
       primary: []
       companies: ["Crusoe", "Tallgrass", "Project Jade"]
@@ -294,22 +256,8 @@ priority_states:
       evanston: ["Evanston", "Uinta County", "southwest Wyoming"]
       casper: ["Casper", "Natrona County", "central Wyoming"]
       cheyenne: ["Cheyenne", "Laramie County", "southeast Wyoming"]
-    web_search_queries:
-      - '"Wyoming data center"'
-      - '"Prometheus Hyperscale" Wyoming'
-      - '"hyperscale" Wyoming energy'
 
   texas:
-    feeds:
-      - name: "Texas Tribune"
-        url: "https://feeds.texastribune.org/feeds/main/"
-        enabled: true
-      - name: "Dallas Observer"
-        url: "https://www.dallasobserver.com/feed"
-        enabled: true
-      - name: "Dallas Business Journal"
-        url: "https://feeds.bizjournals.com/bizj_dallas"
-        enabled: true
     keywords:
       primary: []
       companies: ["Skybox", "Stream Data Centers"]
@@ -317,24 +265,8 @@ priority_states:
     locations:
       dallas: ["Dallas", "Dallas-Fort Worth", "DFW", "Ellis County",
                "Lancaster", "Red Oak", "Venus"]
-    web_search_queries:
-      - '"data center" Dallas OR "Dallas-Fort Worth"'
-      - 'ERCOT "data center" Texas'
 
   michigan:
-    feeds:
-      - name: "Bridge Michigan"
-        url: "https://bridgemi.com/rss.xml"
-        enabled: true
-      - name: "Planet Detroit"
-        url: "https://planetdetroit.org/feed/"
-        enabled: true
-      - name: "Herald-Palladium"
-        url: "https://www.heraldpalladium.com/search/?f=rss&t=article&c=news/local&l=25&s=start_time&sd=desc"
-        enabled: true
-      - name: "Gander Newsroom"
-        url: "https://gandernewsroom.com/feed/"
-        enabled: true
     keywords:
       primary: []
       companies: ["Panattoni", "Related Digital", "Green Chile Ventures"]
@@ -343,10 +275,6 @@ priority_states:
       ann_arbor: ["Ann Arbor", "Saline Township", "Washtenaw County"]
       van_buren: ["Van Buren Township", "Wayne County"]
       benton_harbor: ["Benton Harbor", "Benton Township", "Berrien County", "St. Joseph"]
-    web_search_queries:
-      - '"data center" Michigan'
-      - '"data center" "Van Buren Township" OR "Wayne County" Michigan'
-      - '"data center" "Benton Harbor" OR "Berrien County"'
 
 # ──────────────────────────────────────────────
 # Topic categories for article classification

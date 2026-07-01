@@ -119,34 +119,6 @@ def _check_title_similarity(title, existing_signatures):
     return False, None
 
 
-def _resolve_article_url(article, resolved_cache, existing_urls):
-    """
-    Resolve Google News redirect URLs only for articles we intend to persist.
-    Returns the final URL to store or None if the resolved URL already exists.
-    """
-    url = article.get("url") or ""
-    if not url or "news.google.com" not in url:
-        return url or None
-
-    cached = resolved_cache.get(url)
-    if cached is None:
-        from scraper import resolve_google_news_url
-
-        cached = resolve_google_news_url(
-            url,
-            interval=0.3,
-            title=article.get("title"),
-            source=article.get("source"),
-        )
-        resolved_cache[url] = cached
-
-    final_url = cached or url
-    if final_url != url and final_url in existing_urls:
-        logger.debug("Resolved URL duplicate skipped: %s", final_url[:80])
-        return None
-    return final_url
-
-
 def _summary_is_title_only(article):
     """Return True when Google News only gives us a title/source stub."""
     title_norm = normalize_for_comparison(article.get("title") or "")
@@ -195,18 +167,22 @@ def _manual_review_reason(article, final_url=None):
 
 def run_websearch(query=None, days_back=30, state=None,
                   per_state=False, start_date=None, end_date=None,
-                  skip_analysis=False, progress_callback=None):
+                  skip_analysis=False, dry_run=False, progress_callback=None):
     """
     Search Google News RSS, score results with Claude, store in pending queue.
 
-    Default mode (per_state=False):
-        Runs nationwide + priority-state queries. Same as before.
+    Two modes:
+      Sweep mode (per_state=True):
+        Runs sweep_queries templates × all 50 US states, plus a nationwide
+        thematic pass (config nationwide.thematic_queries) run once each with no
+        state suffix and attributed via text inference. Supports date-range
+        (start_date/end_date) or days_back, progress tracking for resumability,
+        and optionally chains sentiment analysis after insert (skip_analysis).
+      Explicit-query mode (query="..."):
+        Runs a single caller-supplied query.
 
-    Sweep mode (per_state=True):
-        Runs sweep_queries templates × all 50 US states.
-        Supports date-range (start_date/end_date) or days_back.
-        Includes progress tracking for resumability.
-        Optionally chains sentiment analysis after insert.
+    dry_run: fetch + dedup + count only — no relevance scoring (no API cost),
+    no DB writes, no progress mutation, no analysis.
 
     Returns dict with summary statistics.
     """
@@ -252,38 +228,51 @@ def run_websearch(query=None, days_back=30, state=None,
                     "template": template,  # For progress tracking
                 })
 
+        # Nationwide thematic pass: high-signal company/national queries run ONCE
+        # each (no state suffix), attributed later via text inference. Catches
+        # national stories that don't name a state. Skipped for single-state
+        # sweeps so they stay scoped.
+        thematic_count = 0
+        if not state:
+            for tq in nationwide.get("thematic_queries", []):
+                queries_to_run.append({
+                    "query": tq,
+                    "state": None,
+                    "template": tq,  # participate in progress tracking
+                })
+                thematic_count += 1
+
         # Default to 7 days for sweep if no explicit date params
         if not start_date and days_back == 30:
             days_back = 7
 
-        logger.info("Sweep mode: %d templates × %d states = %d queries",
-                    len(templates), len(state_keys), len(queries_to_run))
+        logger.info("Sweep mode: %d templates × %d states + %d thematic = %d queries",
+                    len(templates), len(state_keys), thematic_count, len(queries_to_run))
     elif query:
         # Explicit query — run it without state association
         queries_to_run.append({"query": query.strip(), "state": state})
-    else:
-        # Default: nationwide discovery + priority state queries
-        if not state:
-            nationwide = config.get("nationwide", {})
-            for q in nationwide.get("web_search_queries", []):
-                queries_to_run.append({"query": q, "state": None})
 
-        priority_states = config.get("priority_states", {})
-        for state_key, state_cfg in priority_states.items():
-            if state and state_key != state:
-                continue
-            for q in state_cfg.get("web_search_queries", []):
-                queries_to_run.append({"query": q, "state": state_key})
-
-        if not queries_to_run:
-            queries_to_run.append({"query": DEFAULT_QUERY, "state": None})
+    if not queries_to_run:
+        logger.warning(
+            "No queries to run (per_state=%s, query=%r) — nothing to do.",
+            per_state, query,
+        )
+        return {
+            "search_id": search_id, "query": query, "total_results": 0,
+            "new_articles": 0, "skipped_url": 0, "skipped_title": 0,
+            "skipped_progress": 0, "scored": 0, "auto_approved": 0,
+            "analyzed": 0, "api_key_set": False, "days_back": days_back,
+            "per_state": per_state, "states_searched": 0,
+        }
 
     logger.info("Running %d search queries (per_state=%s)", len(queries_to_run), per_state)
 
     # ── Progress tracking (sweep mode only) ───────────────────────
     completed_progress = set()
+    date_key = None
     if per_state:
-        completed_progress = _load_sweep_progress()
+        if not dry_run:
+            completed_progress = _load_sweep_progress()
         # Date key for progress: identifies this sweep's date window
         if start_date:
             date_key = f"{start_date}:{end_date or 'now'}"
@@ -322,7 +311,6 @@ def run_websearch(query=None, days_back=30, state=None,
         skipped_progress = 0
         matched_articles = []
         states_searched = set()
-        resolved_url_cache = {}
 
         for i, query_info in enumerate(queries_to_run):
             search_query = query_info["query"]
@@ -445,15 +433,16 @@ def run_websearch(query=None, days_back=30, state=None,
                     "state": final_state,
                 })
 
-            # Mark progress (sweep mode)
+            # Mark progress (sweep mode) — never persist during a dry run
             if per_state and "template" in query_info:
                 completed_progress.add(progress_key)
-                _save_sweep_progress(completed_progress)
+                if not dry_run:
+                    _save_sweep_progress(completed_progress)
 
             time.sleep(1)  # Rate limit between queries
 
         # Final progress save
-        if per_state:
+        if per_state and not dry_run:
             _save_sweep_progress(completed_progress)
 
         keyword_matches = len(matched_articles)
@@ -466,17 +455,17 @@ def run_websearch(query=None, days_back=30, state=None,
         api_key_set = client is not None
         scored = 0
         auto_approved = 0
-        if per_state:
+        # Always try the local LLM first (cheap); fall back to the Claude API.
+        try:
+            import local_llm
+            local_ready = local_llm.ensure_running()
+        except Exception as e:
+            logger.debug("Local LLM unavailable: %s", e)
             local_ready = False
-        else:
-            try:
-                import local_llm
-                local_ready = local_llm.ensure_running()
-            except Exception as e:
-                logger.debug("Local LLM unavailable: %s", e)
-                local_ready = False
 
         def score_article(article):
+            if dry_run:
+                return article, None, None
             rel_score, rel_reason = score_relevance_hybrid(
                 article, client, relevance_model, local_ready=local_ready,
             )
@@ -484,6 +473,8 @@ def run_websearch(query=None, days_back=30, state=None,
 
         def persist_scored_article(article, rel_score, rel_reason):
             nonlocal scored, auto_approved
+            if dry_run:
+                return
             if rel_score is not None:
                 article["relevance_score"] = rel_score
                 article["relevance_reason"] = rel_reason
@@ -536,7 +527,7 @@ def run_websearch(query=None, days_back=30, state=None,
             article["source_type"] = "websearch"
             db.insert_pending_article(conn, article)
 
-        if per_state and not local_ready and matched_articles:
+        if not local_ready and len(matched_articles) > 1:
             workers = max(1, int(pipeline.get("relevance_workers", 6)))
             logger.info("Scoring %d articles with %d workers", len(matched_articles), workers)
             with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -565,14 +556,15 @@ def run_websearch(query=None, days_back=30, state=None,
                 article, rel_score, rel_reason = score_article(article)
                 persist_scored_article(article, rel_score, rel_reason)
 
-        db.insert_feed_run(conn, "Web Search" + (" (sweep)" if per_state else ""),
-                          total_results, keyword_matches, "success")
+        if not dry_run:
+            db.insert_feed_run(conn, "Web Search" + (" (sweep)" if per_state else ""),
+                              total_results, keyword_matches, "success")
     finally:
         conn.close()
 
     # ── Post-sweep analysis ───────────────────────────────────────
     analyzed = 0
-    if per_state and not skip_analysis and auto_approved > 0:
+    if per_state and not skip_analysis and not dry_run and auto_approved > 0:
         try:
             import analyze
             logger.info("Running analysis on %d new auto-approved articles...", auto_approved)
@@ -589,8 +581,8 @@ def run_websearch(query=None, days_back=30, state=None,
         except Exception as e:
             logger.error("Post-sweep analysis failed: %s", e)
 
-    # Clear progress on successful complete sweep (not single-state)
-    if per_state and not state:
+    # Clear progress on successful complete sweep (not single-state, not dry-run)
+    if per_state and not state and not dry_run:
         _clear_sweep_progress()
 
     return {
@@ -608,4 +600,5 @@ def run_websearch(query=None, days_back=30, state=None,
         "days_back": days_back,
         "per_state": per_state,
         "states_searched": len(states_searched) if per_state else 0,
+        "dry_run": dry_run,
     }

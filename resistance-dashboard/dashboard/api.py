@@ -1110,13 +1110,16 @@ def config_keywords():
     nationwide = config.get("nationwide", {})
     result = {
         "nationwide_keywords": nationwide.get("keywords", {}),
-        "nationwide_queries": nationwide.get("web_search_queries", []),
+        "nationwide_queries": (
+            nationwide.get("sweep_queries", [])
+            + nationwide.get("thematic_queries", [])
+        ),
         "priority_states": {},
     }
     for state_key, state_cfg in config.get("priority_states", {}).items():
         result["priority_states"][state_key] = {
             "keywords": state_cfg.get("keywords", {}),
-            "web_search_queries": state_cfg.get("web_search_queries", []),
+            "locations": state_cfg.get("locations", {}),
         }
     return jsonify(result)
 
@@ -1348,15 +1351,6 @@ def control_unanalyzed():
         conn.close()
 
 
-@bp.route("/control/run-ingest", methods=["POST"])
-@local_only
-def control_run_ingest():
-    """Trigger RSS feed ingestion in background."""
-    import ingest
-    task_id = _run_in_background("ingest", ingest.ingest_feeds)
-    return jsonify({"task_id": task_id})
-
-
 @bp.route("/control/run-analysis", methods=["POST"])
 @local_only
 def control_run_analysis():
@@ -1485,12 +1479,25 @@ def control_run_websearch():
 
     def _worker():
         try:
-            result = websearch.run_websearch(
-                query=query,
-                days_back=days_back,
-                state=state,
-                progress_callback=_progress,
-            )
+            if query:
+                # Explicit ad-hoc query
+                result = websearch.run_websearch(
+                    query=query,
+                    days_back=days_back,
+                    state=state,
+                    progress_callback=_progress,
+                )
+            else:
+                # No query → run the unified per-state sweep (the old nationwide
+                # default-query mode has been retired). Analysis runs separately
+                # via /control/run-analysis.
+                result = websearch.run_websearch(
+                    per_state=True,
+                    days_back=days_back,
+                    state=state,
+                    skip_analysis=True,
+                    progress_callback=_progress,
+                )
             with _tasks_lock:
                 _tasks[task_id]["status"] = "completed"
                 _tasks[task_id]["finished"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()

@@ -2380,14 +2380,12 @@ async function submitArticle(e) {
 }
 
 const TASK_ENDPOINTS = {
-    ingest: '/api/control/run-ingest',
     analysis: '/api/control/run-analysis',
     reprocess: '/api/control/reprocess-low-confidence',
     digest: '/api/control/run-digest',
 };
 
 const TASK_BTN_MAP = {
-    ingest: 'btnIngest',
     analysis: 'btnRunAnalysis',
     reprocess: 'btnReprocessLowConfidence',
     digest: 'btnDigest',

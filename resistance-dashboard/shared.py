@@ -52,7 +52,8 @@ def normalize_config(config):
     if "global_keywords" in config and "nationwide" not in config:
         config["nationwide"] = {
             "keywords": config.pop("global_keywords"),
-            "web_search_queries": [],
+            "sweep_queries": [],
+            "thematic_queries": [],
         }
     return config
 

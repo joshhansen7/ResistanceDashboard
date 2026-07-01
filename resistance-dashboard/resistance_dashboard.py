@@ -3,20 +3,21 @@
 Prometheus Resistance Dashboard — Main CLI Entry Point
 Sentiment tracking for data center development across the United States.
 
+Articles are sourced via Google News search (50-state sweep + nationwide
+thematic pass). RSS feeds have been retired.
+
 Usage:
-  python resistance_dashboard.py ingest          Fetch RSS feeds and filter articles
+  python resistance_dashboard.py run             Daily pipeline: search sweep → resolve/scrape → analyze → digest (if due)
+  python resistance_dashboard.py run --days 2 --dry-run
+  python resistance_dashboard.py backfill --from 2025-09-01 --to 2026-01-01 [--state ohio]
   python resistance_dashboard.py analyze         Run sentiment analysis on new articles
   python resistance_dashboard.py digest          Generate digest for current period
   python resistance_dashboard.py digest --from YYYY-MM-DD --to YYYY-MM-DD
   python resistance_dashboard.py status          Show database stats
-  python resistance_dashboard.py run             Full pipeline: ingest → analyze → digest (if due)
-  python resistance_dashboard.py manual          Launch manual input tool
   python resistance_dashboard.py infill          Resolve Google News URLs (gradual) + scrape thin content
   python resistance_dashboard.py infill --upgrade  Also re-scrape + reanalyze recent low-confidence articles
-  python resistance_dashboard.py backfill        Ingest + analyze all, generate baseline digest
-  python resistance_dashboard.py sweep           Per-state sweep: search all 50 states systematically
-  python resistance_dashboard.py sweep --days 30 --state ohio
-  python resistance_dashboard.py sweep --start 2025-06-01 --end 2025-12-31
+  python resistance_dashboard.py manual          Launch manual input tool
+  python resistance_dashboard.py dashboard       Launch the web dashboard
 """
 
 import argparse
@@ -31,12 +32,10 @@ PROJECT_DIR = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_DIR))
 
 import db
-import ingest
 import analyze
 import digest
 import manual_input
 import websearch
-import historical_backfill
 from shared import APP_NAME, APP_SLUG, prepare_log_path
 
 
@@ -65,17 +64,6 @@ def setup_logging():
     root_logger.addHandler(file_handler)
 
     return root_logger
-
-
-def cmd_ingest(args):
-    """Fetch RSS feeds and filter articles."""
-    print(f"\n📡 {APP_NAME} — Ingesting feeds...")
-    result = ingest.ingest_feeds()
-    print(f"\nResults:")
-    print(f"  Feeds checked:    {result['feeds_checked']}")
-    print(f"  Total entries:    {result['total_entries']}")
-    print(f"  Keyword matches:  {result['keyword_matches']}")
-    print(f"  New articles:     {result['new_articles']}")
 
 
 def cmd_analyze(args):
@@ -143,21 +131,27 @@ def cmd_status(args):
     print(f"\nAPI usage estimate this month: {stats['api_usage_estimate']}")
 
 
-def cmd_run(args):
-    """Full pipeline: ingest → analyze → digest (if due)."""
-    print(f"\n🚀 {APP_NAME} — Full Pipeline Run")
-    print("=" * 40)
+def _run_infill():
+    """Resolve a bounded slice of Google News URLs + scrape thin content.
 
-    # Step 1: Ingest
-    print("\n--- Step 1: Ingesting feeds ---")
-    cmd_ingest(args)
+    Shared by the daily pipeline and backfill. Reads pacing/limits from the
+    `infill` config block. Returns the combined infill stats dict.
+    """
+    import scraper
+    from shared import load_config
+    cfg = load_config() or {}
+    infill_cfg = cfg.get("infill", {}) if isinstance(cfg, dict) else {}
+    return scraper.infill_articles(
+        resolve_limit=infill_cfg.get("resolve_limit_per_run", 50),
+        interval=infill_cfg.get("interval_seconds", 2.0),
+        backoff=infill_cfg.get("rate_limit_backoff_seconds", 60.0),
+        max_rate_limit_hits=infill_cfg.get("max_rate_limit_hits", 3),
+        workers=infill_cfg.get("scrape_workers", 4),
+    )
 
-    # Step 2: Analyze
-    print("\n--- Step 2: Analyzing articles ---")
-    cmd_analyze(args)
 
-    # Step 3: Digest (check if one is due)
-    print("\n--- Step 3: Checking digest schedule ---")
+def _maybe_generate_digest(args, interval_days=14):
+    """Generate a digest if `interval_days` have elapsed since the last one."""
     conn = db.get_connection()
     row = conn.execute(
         "SELECT period_end FROM digests ORDER BY generated_date DESC LIMIT 1"
@@ -167,14 +161,72 @@ def cmd_run(args):
     if row:
         last_end = datetime.fromisoformat(row["period_end"])
         days_since = (datetime.now(timezone.utc).replace(tzinfo=None) - last_end).days
-        if days_since >= 14:
+        if days_since >= interval_days:
             print(f"  Last digest ended {days_since} days ago. Generating new digest...")
             cmd_digest(args)
         else:
-            print(f"  Last digest ended {days_since} days ago. Next due in {14 - days_since} days.")
+            print(f"  Last digest ended {days_since} days ago. Next due in {interval_days - days_since} days.")
     else:
         print("  No previous digest found. Generating first digest...")
         cmd_digest(args)
+
+
+def _month_windows(start_date, end_date):
+    """Yield (window_start, window_end) date strings for each calendar month.
+
+    Splits a long date range into monthly windows so each Google News query
+    stays under the ~100-result cap (preserves historical-backfill coverage).
+    """
+    current = datetime.strptime(start_date, "%Y-%m-%d").replace(day=1)
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    while current <= end:
+        window_start = max(current, datetime.strptime(start_date, "%Y-%m-%d"))
+        if current.month == 12:
+            next_month = current.replace(year=current.year + 1, month=1)
+        else:
+            next_month = current.replace(month=current.month + 1)
+        window_end = min(next_month - timedelta(days=1), end)
+        yield window_start.strftime("%Y-%m-%d"), window_end.strftime("%Y-%m-%d")
+        current = next_month
+
+
+def cmd_run(args):
+    """Daily pipeline: search sweep → resolve/scrape → analyze → digest (if due)."""
+    days = getattr(args, "days_back", 2)
+    dry_run = getattr(args, "dry_run", False)
+
+    print(f"\n🚀 {APP_NAME} — Daily Pipeline Run")
+    print("=" * 40)
+    if dry_run:
+        print("  Mode: DRY RUN (search preview only — no writes/scrape/analyze/digest)")
+
+    # Step 1: Search sweep (all 50 states + nationwide thematic pass)
+    print(f"\n--- Step 1: Search sweep (last {days} days) ---")
+    sweep = websearch.run_websearch(
+        per_state=True, days_back=days, skip_analysis=True, dry_run=dry_run,
+    )
+    print(f"  States searched: {sweep.get('states_searched', 0)}")
+    print(f"  Total results:   {sweep.get('total_results', 0)}")
+    print(f"  New articles:    {sweep.get('new_articles', 0)}")
+    print(f"  Auto-approved:   {sweep.get('auto_approved', 0)}")
+
+    if dry_run:
+        print("\n✅ Pipeline dry-run complete!")
+        return
+
+    # Step 2: Infill — resolve Google News URLs + scrape thin content
+    print("\n--- Step 2: Resolving URLs + scraping content ---")
+    infill = _run_infill()
+    print(f"  URLs resolved:    {infill.get('resolve', {}).get('resolved', 0)}")
+    print(f"  Articles scraped: {infill.get('scrape', {}).get('scraped', 0)}")
+
+    # Step 3: Analyze (after infill, so it sees freshly scraped full_text)
+    print("\n--- Step 3: Analyzing articles ---")
+    cmd_analyze(args)
+
+    # Step 4: Digest (if due)
+    print("\n--- Step 4: Checking digest schedule ---")
+    _maybe_generate_digest(args)
 
     print("\n✅ Pipeline complete!")
 
@@ -259,117 +311,89 @@ def cmd_infill(args):
 
 
 def cmd_backfill(args):
-    """Backfill: ingest + analyze all + generate baseline digest."""
-    print(f"\n📦 {APP_NAME} — Backfill Mode")
-    print("=" * 35)
-    print("This will ingest all available RSS content, analyze everything,")
-    print("and generate a baseline digest.\n")
+    """Historical backfill: date-range search sweep → resolve/scrape → analyze → baseline digest.
 
-    # Ingest
-    print("--- Ingesting all feeds ---")
-    cmd_ingest(args)
-
-    # Analyze all (higher limit)
-    print("\n--- Analyzing all articles ---")
-    result = analyze.analyze_articles(limit=200)
-    if result.get("error"):
-        print(f"\nError: {result['error']}")
-        print("Set your API key: export ANTHROPIC_API_KEY='sk-ant-...'")
-        print("\nArticles have been ingested and saved. Run 'analyze' after setting the key.")
-        return
-    print(f"  Analyzed: {result.get('analyzed', 0)}")
-
-    # Generate baseline digest covering Jan 1, 2026 to today
-    print("\n--- Generating baseline digest ---")
-    today = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
-    digest.generate_digest(start_date="2026-01-01", end_date=today)
-
-    print("\n✅ Backfill complete!")
-
-
-def cmd_historical_backfill(args):
-    """Historical backfill: sweep Google News with date-range queries."""
-    print(f"\n📜 {APP_NAME} — Historical Backfill")
-    print("=" * 40)
-
-    result = historical_backfill.run_historical_backfill(
-        start_date=args.from_date,
-        end_date=args.to_date,
-        state=args.state,
-        dry_run=args.dry_run,
-        skip_analysis=args.skip_analysis,
-    )
-
-    if result.get("error"):
-        print(f"\nError: {result['error']}")
-        return
-
-    print(f"\nResults:")
-    print(f"  Total fetched:     {result['total_fetched']}")
-    print(f"  New articles:      {result['total_new']}")
-    print(f"  Skipped (URL):     {result['skipped_url']}")
-    print(f"  Skipped (title):   {result['skipped_title']}")
-    print(f"  Auto-inserted:     {result['auto_inserted']}")
-    print(f"  Sent to pending:   {result['sent_to_pending']}")
-    if result.get("analyzed"):
-        print(f"  Analyzed:          {result['analyzed']}")
-    if result["dry_run"]:
-        print("\n  (Dry run — no changes were made)")
-
-    print("\n✅ Historical backfill complete!")
-
-
-def cmd_sweep(args):
-    """Per-state sweep: search all 50 states with template queries."""
-    print(f"\n🔍 {APP_NAME} — Per-State Sweep")
-    print("=" * 40)
-
-    days_back = getattr(args, "days_back", 7)
-    start_date = getattr(args, "start_date", None)
-    end_date = getattr(args, "end_date", None)
-    state_filter = getattr(args, "state", None)
+    Replaces the old RSS backfill and the separate historical-backfill command.
+    A date range is split into monthly windows so each Google News query stays
+    under the ~100-result cap. Without --from, falls back to a days-back sweep.
+    """
+    start_date = getattr(args, "from_date", None)
+    end_date = getattr(args, "to_date", None) or \
+        datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d")
+    state = getattr(args, "state", None)
+    days_back = getattr(args, "days_back", 30)
     dry_run = getattr(args, "dry_run", False)
     skip_analysis = getattr(args, "skip_analysis", False)
 
+    print(f"\n📦 {APP_NAME} — Historical Backfill")
+    print("=" * 40)
     if start_date:
-        print(f"  Date range: {start_date} to {end_date or 'now'}")
+        print(f"  Date range: {start_date} → {end_date}  (monthly windows)")
     else:
         print(f"  Looking back: {days_back} days")
-    if state_filter:
-        print(f"  State: {state_filter}")
-    else:
-        print(f"  Scope: all 50 states")
+    print(f"  Scope: {state or 'all 50 states'} + nationwide thematic pass")
     if dry_run:
-        print(f"  Mode: DRY RUN (no DB writes or API calls)")
+        print("  Mode: DRY RUN (no DB writes or API calls)")
     print()
 
-    result = websearch.run_websearch(
-        per_state=True,
-        days_back=days_back,
-        start_date=start_date,
-        end_date=end_date,
-        state=state_filter,
-        skip_analysis=skip_analysis,
-    )
+    # Build the list of date windows to sweep.
+    if start_date:
+        windows = list(_month_windows(start_date, end_date))
+    else:
+        windows = [(None, None)]  # days-back mode: single window
 
-    if result.get("error"):
-        print(f"\nError: {result['error']}")
+    totals = {"total_results": 0, "new_articles": 0, "auto_approved": 0, "scored": 0}
+    for i, (win_start, win_end) in enumerate(windows, start=1):
+        label = f"{win_start} → {win_end}" if win_start else f"last {days_back}d"
+        print(f"  [{i}/{len(windows)}] sweeping {label} ...")
+        result = websearch.run_websearch(
+            per_state=True,
+            days_back=days_back,
+            start_date=win_start,
+            end_date=win_end,
+            state=state,
+            skip_analysis=True,   # analyze once at the end, after infill
+            dry_run=dry_run,
+        )
+        if result.get("error"):
+            print(f"    Error: {result['error']}")
+            continue
+        for k in totals:
+            totals[k] += result.get(k, 0) or 0
+
+    print(f"\nSweep totals:")
+    print(f"  Total results:   {totals['total_results']}")
+    print(f"  New articles:    {totals['new_articles']}")
+    print(f"  Auto-approved:   {totals['auto_approved']}")
+
+    if dry_run:
+        print("\n  (Dry run — no changes were made)")
+        print("\n✅ Backfill dry-run complete!")
         return
 
-    print(f"\nResults:")
-    print(f"  States searched:   {result.get('states_searched', 0)}")
-    print(f"  Total results:     {result['total_results']}")
-    print(f"  New articles:      {result['new_articles']}")
-    print(f"  Skipped (URL):     {result['skipped_url']}")
-    print(f"  Skipped (title):   {result['skipped_title']}")
-    if result.get('skipped_progress'):
-        print(f"  Skipped (resumed): {result['skipped_progress']}")
-    print(f"  Scored:            {result['scored']}")
-    print(f"  Auto-approved:     {result['auto_approved']}")
-    if result.get('analyzed'):
-        print(f"  Analyzed:          {result['analyzed']}")
+    # Resolve URLs + scrape, then analyze (so analysis sees full_text).
+    if not skip_analysis:
+        print("\n--- Resolving URLs + scraping content ---")
+        infill = _run_infill()
+        print(f"  URLs resolved:    {infill.get('resolve', {}).get('resolved', 0)}")
+        print(f"  Articles scraped: {infill.get('scrape', {}).get('scraped', 0)}")
 
-    print("\n✅ Sweep complete!")
+        print("\n--- Analyzing articles ---")
+        ana = analyze.analyze_articles(limit=200)
+        if ana.get("error"):
+            print(f"  Analysis error: {ana['error']}")
+            print("  Articles saved — run 'analyze' later after setting the API key.")
+        else:
+            print(f"  Analyzed: {ana.get('analyzed', 0)}")
+
+    # Baseline digest covering the backfilled period.
+    print("\n--- Generating baseline digest ---")
+    digest.generate_digest(
+        start_date=start_date or "2026-01-01",
+        end_date=end_date,
+    )
+
+    print("\n✅ Backfill complete!")
 
 
 def main():
@@ -381,9 +405,6 @@ def main():
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
-
-    # ingest
-    subparsers.add_parser("ingest", help="Fetch RSS feeds and filter articles")
 
     # analyze
     subparsers.add_parser("analyze", help="Run sentiment analysis on new articles")
@@ -400,8 +421,19 @@ def main():
     # status
     subparsers.add_parser("status", help="Show database statistics")
 
-    # run
-    subparsers.add_parser("run", help="Full pipeline: ingest → analyze → digest")
+    # run — daily search pipeline
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Daily pipeline: search sweep → resolve/scrape → analyze → digest (if due)",
+    )
+    run_parser.add_argument(
+        "--days", dest="days_back", default=2, type=int,
+        help="Days to look back in the sweep (default: 2)",
+    )
+    run_parser.add_argument(
+        "--dry-run", dest="dry_run", action="store_true",
+        help="Preview the search sweep only — no DB writes, scrape, analyze, or digest",
+    )
 
     # manual
     subparsers.add_parser("manual", help="Launch manual input tool")
@@ -445,63 +477,34 @@ def main():
         help="Max articles to upgrade with --upgrade (default: 100)",
     )
 
-    # backfill
-    subparsers.add_parser("backfill", help="Ingest + analyze all + baseline digest")
-
-    # sweep
-    sweep_parser = subparsers.add_parser(
-        "sweep",
-        help="Per-state sweep: search all 50 states with template queries",
+    # backfill — historical date-range search (subsumes the old historical-backfill)
+    backfill_parser = subparsers.add_parser(
+        "backfill",
+        help="Historical date-range search → resolve/scrape → analyze → baseline digest",
     )
-    sweep_parser.add_argument(
-        "--days", dest="days_back", default=7, type=int,
-        help="Days to look back (default: 7)",
+    backfill_parser.add_argument(
+        "--from", dest="from_date", default=None,
+        help="Start date (YYYY-MM-DD). Split into monthly windows. Omit for a days-back sweep.",
     )
-    sweep_parser.add_argument(
-        "--start", dest="start_date", default=None,
-        help="Start date (YYYY-MM-DD, overrides --days)",
-    )
-    sweep_parser.add_argument(
-        "--end", dest="end_date", default=None,
-        help="End date (YYYY-MM-DD, used with --start)",
-    )
-    sweep_parser.add_argument(
-        "--state", default=None,
-        help="Limit to one state (e.g. ohio, 'north dakota')",
-    )
-    sweep_parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Fetch and match but don't write to DB or call API",
-    )
-    sweep_parser.add_argument(
-        "--skip-analysis", action="store_true",
-        help="Don't run sentiment analysis after inserting articles",
-    )
-
-    # historical-backfill
-    hb_parser = subparsers.add_parser(
-        "historical-backfill",
-        help="Backfill articles from Google News over a historical date range",
-    )
-    hb_parser.add_argument(
-        "--from", dest="from_date", default="2025-09-01",
-        help="Start date (YYYY-MM-DD, default: 2025-09-01)",
-    )
-    hb_parser.add_argument(
+    backfill_parser.add_argument(
         "--to", dest="to_date", default=None,
         help="End date (YYYY-MM-DD, default: today)",
     )
-    hb_parser.add_argument(
+    backfill_parser.add_argument(
+        "--days", dest="days_back", default=30, type=int,
+        help="Days to look back when --from is not given (default: 30)",
+    )
+    backfill_parser.add_argument(
         "--state", default=None,
-        help="Limit to one state (e.g. wyoming, texas, michigan)",
+        help="Limit to one state (e.g. ohio, 'north dakota')",
     )
-    hb_parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Fetch and match but don't write to DB or call API",
+    backfill_parser.add_argument(
+        "--dry-run", dest="dry_run", action="store_true",
+        help="Fetch and match but don't write to DB or call the API",
     )
-    hb_parser.add_argument(
-        "--skip-analysis", action="store_true",
-        help="Ingest only; skip sentiment analysis",
+    backfill_parser.add_argument(
+        "--skip-analysis", dest="skip_analysis", action="store_true",
+        help="Sweep + store only; skip resolve/scrape/analyze (still writes baseline digest)",
     )
 
     args = parser.parse_args()
@@ -515,7 +518,6 @@ def main():
     db.init_db()
 
     commands = {
-        "ingest": cmd_ingest,
         "analyze": cmd_analyze,
         "digest": cmd_digest,
         "status": cmd_status,
@@ -524,8 +526,6 @@ def main():
         "manual": cmd_manual,
         "infill": cmd_infill,
         "backfill": cmd_backfill,
-        "sweep": cmd_sweep,
-        "historical-backfill": cmd_historical_backfill,
     }
 
     cmd_func = commands.get(args.command)
