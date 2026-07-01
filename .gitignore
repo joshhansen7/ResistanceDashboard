@@ -10,6 +10,8 @@ __pycache__/
 # Data / logs (allow fixtures for seed data)
 resistance-dashboard/data/*
 !resistance-dashboard/data/fixtures/
+# Data archives prepared for out-of-band transfer (never commit — can be large)
+resistance-dashboard/*.zip
 resistance-dashboard/logs/
 resistance-dashboard/output/
 
