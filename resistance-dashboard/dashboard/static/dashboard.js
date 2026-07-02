@@ -2413,7 +2413,9 @@ async function runTask(type) {
         } else if (type === 'reprocess') {
             const batchVal = document.getElementById('reprocessBatchSize')?.value || '250';
             fetchOpts.headers = { 'Content-Type': 'application/json' };
-            fetchOpts.body = JSON.stringify({ limit: parseInt(batchVal), days_back: 30 });
+            // No days_back: the upgrade pass covers the whole backlog (it only
+            // touches rows whose URL is already resolved, so no Google traffic).
+            fetchOpts.body = JSON.stringify({ limit: parseInt(batchVal) });
         }
         const resp = await fetch(TASK_ENDPOINTS[type], fetchOpts);
         const data = await resp.json();

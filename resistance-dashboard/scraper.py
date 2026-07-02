@@ -280,27 +280,19 @@ def scrape_article_metadata(url):
 def _scrape_thin_article(row):
     url = row["url"]
     title = row["title"]
-    source = row["source"]
 
+    # Wrapper URLs are only selected once the resolver has stored a real URL;
+    # never resolve here — this runs in a thread pool with no pacing, and
+    # unpaced parallel hits are what trip Google's rate limiter.
     resolved_url = row["resolved_url"] or url
-    if db.is_google_news_wrapper(url):
-        if not row["resolved_url"]:
-            return {
-                "id": row["id"],
-                "title": title,
-                "url": url,
-                "resolved_url": url,
-                "text": None,
-            }
-        resolved_url = resolve_google_news_url(url, title=title, source=source)
-        if resolved_url == url:
-            return {
-                "id": row["id"],
-                "title": title,
-                "url": url,
-                "resolved_url": resolved_url,
-                "text": None,
-            }
+    if db.is_google_news_wrapper(url) and resolved_url == url:
+        return {
+            "id": row["id"],
+            "title": title,
+            "url": url,
+            "resolved_url": url,
+            "text": None,
+        }
 
     text = scrape_url(resolved_url)
     return {
@@ -317,8 +309,14 @@ def scrape_thin_articles(conn, limit=None, progress_callback=None, article_ids=N
     Find articles with thin full_text and attempt to scrape full content.
     Returns dict with summary stats.
     """
-    where = "analyzed = 0 AND url IS NOT NULL AND url != '' AND COALESCE(scrape_status, 'pending') = 'pending'"
-    params = []
+    # Unresolved wrappers are left out entirely: they stay 'pending' with no
+    # attempt burned until gradual_resolve_google_news supplies a resolved_url.
+    where = (
+        "analyzed = 0 AND url IS NOT NULL AND url != ''"
+        " AND COALESCE(scrape_status, 'pending') = 'pending'"
+        f" AND NOT {db.unresolved_wrapper_predicate('articles')}"
+    )
+    params = list(db.unresolved_wrapper_params())
     if article_ids:
         placeholders = ",".join("?" * len(article_ids))
         where += f" AND id IN ({placeholders})"
@@ -399,87 +397,42 @@ def scrape_thin_articles(conn, limit=None, progress_callback=None, article_ids=N
     }
 
 
-def resolve_google_news_urls_batch(conn, limit=None, progress_callback=None):
-    """
-    Resolve all Google News wrapper URLs in the articles table to real URLs.
-    Useful for backfilling existing articles that were stored with Google News URLs.
-    Returns dict with summary stats.
-    """
-    sql = """
-    SELECT id, url, title FROM articles
-    WHERE url LIKE '%news.google.com%'
-    ORDER BY ingested_date ASC
-    """
-    if limit:
-        sql += f" LIMIT {int(limit)}"
-
-    rows = conn.execute(sql).fetchall()
-
-    if not rows:
-        logger.info("No Google News URLs to resolve")
-        return {"resolved": 0, "failed": 0, "total": 0}
-
-    logger.info("Resolving %d Google News URLs", len(rows))
-
-    resolved = 0
-    failed = 0
-
-    for i, row in enumerate(rows):
-        if progress_callback:
-            progress_callback(i + 1, len(rows))
-
-        url = row["url"]
-        title = row["title"]
-        logger.info("Resolving [%d/%d]: %s", i + 1, len(rows), title[:60])
-
-        real_url = resolve_google_news_url(url, interval=0.5)
-        if real_url != url:
-            try:
-                conn.execute(
-                    "UPDATE articles SET resolved_url = ?, scrape_status = 'resolved_only' WHERE id = ?",
-                    (real_url, row["id"]),
-                )
-                conn.commit()
-                resolved += 1
-                logger.info("  -> %s", real_url[:80])
-            except Exception as e:
-                logger.warning("  -> Failed to store resolved URL: %s", e)
-                failed += 1
-        else:
-            failed += 1
-            logger.info("  -> Could not resolve")
-
-        time.sleep(0.3)
-
-    return {"resolved": resolved, "failed": failed, "total": len(rows)}
-
-
-def upgrade_recent_low_confidence_articles(
+def upgrade_resolved_thin_articles(
     conn,
-    days_back=30,
+    days_back=None,
     limit=250,
     progress_callback=None,
     oldest_first=False,
 ):
     """
-    Reprocess recent analyzed low-confidence rows and only overwrite when scrape quality
-    materially improves the article text.
+    Rescrape analyzed thin articles that already carry a usable real URL, and
+    re-analyze the ones whose text materially improves.
+
+    This pass never talks to Google: wrapper rows are only selected once
+    gradual_resolve_google_news has stored a resolved_url, and direct-URL rows
+    are scraped as-is. That keeps it entirely outside Google's rate limit, so
+    the daily run can drain the analyzed-on-a-snippet backlog a bounded slice
+    at a time. `days_back=None` (the default) means no date window.
     """
-    cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days_back)).isoformat()
     order_direction = "ASC" if oldest_first else "DESC"
+    where = db.upgradeable_thin_predicate("articles")
+    params = db.upgradeable_thin_params()
+    if days_back:
+        cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days_back)).isoformat()
+        where += " AND COALESCE(published_date, analyzed_date, ingested_date) >= ?"
+        params = params + [cutoff]
     sql = f"""
     SELECT id, title, source, url, resolved_url, full_text, summary, content_quality
     FROM articles
-    WHERE analyzed = 1
-      AND {db.low_confidence_predicate('articles')}
-      AND COALESCE(published_date, analyzed_date, ingested_date) >= ?
-    ORDER BY COALESCE(published_date, analyzed_date, ingested_date) {order_direction}
+    WHERE {where}
+    ORDER BY COALESCE(scrape_attempts, 0) ASC,
+             COALESCE(published_date, analyzed_date, ingested_date) {order_direction}
     LIMIT ?
     """
-    rows = conn.execute(sql, db.low_confidence_params() + [cutoff, int(limit)]).fetchall()
+    rows = conn.execute(sql, params + [int(limit)]).fetchall()
 
     if not rows:
-        logger.info("No recent low-confidence articles found for upgrade")
+        logger.info("No upgradeable thin articles found")
         return {
             "candidates": 0,
             "attempted": 0,
@@ -490,7 +443,7 @@ def upgrade_recent_low_confidence_articles(
             "reanalyzed": 0,
         }
 
-    resolved = 0
+    resolved = 0  # kept for result-shape compat; resolution happens upstream now
     upgraded = 0
     failed = 0
     not_improved = 0
@@ -501,47 +454,25 @@ def upgrade_recent_low_confidence_articles(
 
     for idx, row in enumerate(rows):
         url = row["url"]
-        resolved_url = row["resolved_url"] or url
-        if db.is_google_news_wrapper(url):
-            candidate_url = resolve_google_news_url(
-                url,
-                interval=0.5,
-                title=row["title"],
-                source=row["source"],
-            )
-            if candidate_url != url:
-                resolved_url = candidate_url
-                resolved += 1
+        target_url = (row["resolved_url"] if db.is_google_news_wrapper(url) else url) or url
 
-        text = scrape_url(resolved_url)
+        text = scrape_url(target_url)
         if not text:
             _record_scrape_attempt(
                 conn,
                 row["id"],
-                "resolved_only" if resolved_url != url else "failed",
-                resolved_url=resolved_url if resolved_url != url else None,
+                "resolved_only" if db.is_google_news_wrapper(url) else "failed",
             )
             failed += 1
         else:
             old_text = row["full_text"] or row["summary"] or ""
             if db.scrape_upgrade_is_material(old_text, text):
-                _record_scrape_attempt(
-                    conn,
-                    row["id"],
-                    "upgraded",
-                    resolved_url=resolved_url if resolved_url != url else None,
-                    full_text=text,
-                )
+                _record_scrape_attempt(conn, row["id"], "upgraded", full_text=text)
                 upgraded += 1
                 upgraded_ids.append(row["id"])
                 logger.info("Upgraded article %d with %d chars", row["id"], len(text))
             else:
-                _record_scrape_attempt(
-                    conn,
-                    row["id"],
-                    "not_improved",
-                    resolved_url=resolved_url if resolved_url != url else None,
-                )
+                _record_scrape_attempt(conn, row["id"], "not_improved")
                 not_improved += 1
 
         conn.commit()
@@ -578,33 +509,55 @@ def upgrade_recent_low_confidence_articles(
     }
 
 
+def _record_resolve_attempt(conn, article_id, resolved_url=None):
+    """Persist the outcome of a definitive resolve attempt."""
+    sets = [
+        "resolve_attempts = COALESCE(resolve_attempts, 0) + 1",
+        "last_resolve_at = ?",
+    ]
+    params = [_now_iso()]
+    if resolved_url:
+        sets.append("resolved_url = ?")
+        params.append(resolved_url)
+    params.append(article_id)
+    conn.execute(f"UPDATE articles SET {', '.join(sets)} WHERE id = ?", params)
+
+
 def gradual_resolve_google_news(
     conn,
     limit=50,
     interval=2.0,
     backoff=60.0,
     max_rate_limit_hits=3,
+    attempts_cap=None,
+    max_seconds=None,
     progress_callback=None,
 ):
     """
     Resolve pending Google News wrapper URLs to their real article URLs, one at a
     time and *paced* to avoid Google's rate limiter (HTTP 429).
 
-    Designed to run unattended once per day on a persistent host: it chews through
-    a bounded slice of the backlog each run, backs off exponentially when Google
-    starts rate-limiting, and stops early after `max_rate_limit_hits` sustained
-    429s so the remaining URLs are simply picked up on the next daily run.
+    Designed to run unattended once per day on a persistent host: it works
+    through the least-attempted URLs first (newest within that, so fresh
+    articles lead but the backlog is never starved), records every definitive
+    attempt so dead URLs age out at `attempts_cap`, retries the same URL after
+    backing off on a 429, and stops early after `max_rate_limit_hits` sustained
+    429s or when `max_seconds` elapses — the remaining URLs are simply picked
+    up on the next daily run.
 
     Only `resolved_url` is written here (never `scrape_status`), so the article
     stays eligible for the scrape pass that follows.
     """
-    sql = """
+    if attempts_cap is None:
+        attempts_cap = db.RESOLVE_ATTEMPTS_CAP
+    sql = f"""
     SELECT id, url, title, source FROM articles
-    WHERE url LIKE ?
-      AND (resolved_url IS NULL OR resolved_url = '' OR resolved_url = url)
-    ORDER BY COALESCE(published_date, ingested_date) DESC
+    WHERE {db.unresolved_wrapper_predicate('articles')}
+      AND COALESCE(resolve_attempts, 0) < ?
+    ORDER BY COALESCE(resolve_attempts, 0) ASC,
+             COALESCE(published_date, ingested_date) DESC
     """
-    params = [db.LOW_CONFIDENCE_URL_PATTERN]
+    params = db.unresolved_wrapper_params() + [int(attempts_cap)]
     if limit:
         sql += " LIMIT ?"
         params.append(int(limit))
@@ -612,10 +565,12 @@ def gradual_resolve_google_news(
 
     stats = {
         "candidates": len(rows),
+        "attempted": 0,
         "resolved": 0,
         "unresolved": 0,
         "rate_limited": False,
         "stopped_early": False,
+        "time_budget_exhausted": False,
     }
     if not rows:
         logger.info("No pending Google News URLs to resolve")
@@ -626,9 +581,17 @@ def gradual_resolve_google_news(
         len(rows), interval, backoff,
     )
 
+    started = time.monotonic()
     consecutive_rate_limits = 0
     current_backoff = backoff
     for i, row in enumerate(rows):
+        if max_seconds and time.monotonic() - started >= max_seconds:
+            logger.warning(
+                "Resolve time budget (%.0fs) spent after %d of %d URLs — rest resume next run",
+                max_seconds, i, len(rows),
+            )
+            stats["time_budget_exhausted"] = True
+            break
         if progress_callback:
             progress_callback({"phase": "resolving", "current": i + 1, "total": len(rows)})
 
@@ -636,47 +599,63 @@ def gradual_resolve_google_news(
 
         # Layer 1: free offline base64 decode (no network, never rate-limited)
         decoded = _try_base64_decode(url)
-        rate_limited = False
+
+        # Layer 2: gnewsdecoder — on 429, back off and retry the SAME url; a
+        # rate limit says nothing about the url itself, so skipping it would
+        # both waste the attempt and leave the row misordered for next run.
+        abandoned_on_rate_limit = False
         if not decoded:
-            decoded, rate_limited = _gnewsdecode_with_status(url, interval=0.5)
+            while True:
+                decoded, rate_limited = _gnewsdecode_with_status(url, interval=0.5)
+                if decoded or not rate_limited:
+                    break
+                stats["rate_limited"] = True
+                consecutive_rate_limits += 1
+                if consecutive_rate_limits >= max_rate_limit_hits:
+                    logger.warning(
+                        "Sustained rate limiting — stopping; remaining URLs resume next run"
+                    )
+                    stats["stopped_early"] = True
+                    abandoned_on_rate_limit = True
+                    break
+                logger.warning(
+                    "Google rate limit (%d/%d consecutive) — backing off %.0fs",
+                    consecutive_rate_limits, max_rate_limit_hits, current_backoff,
+                )
+                time.sleep(current_backoff)
+                current_backoff = min(current_backoff * 2, 600)
+        if abandoned_on_rate_limit:
+            # No definitive outcome for this row — don't burn one of its attempts.
+            break
+
+        # Layer 3: title search fallback (DuckDuckGo — doesn't touch Google)
         if not decoded and row["title"]:
             decoded = _try_title_search(row["title"], row["source"])
 
+        stats["attempted"] += 1
         if decoded and decoded != url:
-            conn.execute(
-                "UPDATE articles SET resolved_url = ? WHERE id = ?",
-                (decoded, row["id"]),
-            )
+            _record_resolve_attempt(conn, row["id"], resolved_url=decoded)
             conn.commit()
             stats["resolved"] += 1
             consecutive_rate_limits = 0
             current_backoff = backoff
             logger.info("Resolved [%d/%d]: %s", i + 1, len(rows), decoded[:80])
         else:
+            _record_resolve_attempt(conn, row["id"])
+            conn.commit()
             stats["unresolved"] += 1
-            if rate_limited:
-                stats["rate_limited"] = True
-                consecutive_rate_limits += 1
-                logger.warning(
-                    "Google rate limit (%d/%d consecutive) — backing off %.0fs",
-                    consecutive_rate_limits, max_rate_limit_hits, current_backoff,
-                )
-                if consecutive_rate_limits >= max_rate_limit_hits:
-                    logger.warning(
-                        "Sustained rate limiting — stopping; remaining URLs resume next run"
-                    )
-                    stats["stopped_early"] = True
-                    break
-                time.sleep(current_backoff)
-                current_backoff = min(current_backoff * 2, 600)
-                continue
+            logger.info(
+                "Unresolved [%d/%d] (attempt recorded): %s",
+                i + 1, len(rows), (row["title"] or url)[:60],
+            )
 
         time.sleep(interval)
 
     logger.info(
-        "Gradual resolve done: %d resolved, %d unresolved of %d candidates%s",
+        "Gradual resolve done: %d resolved, %d unresolved of %d candidates%s%s",
         stats["resolved"], stats["unresolved"], stats["candidates"],
         " (stopped early on rate limit)" if stats["stopped_early"] else "",
+        " (time budget spent)" if stats["time_budget_exhausted"] else "",
     )
     return stats
 
@@ -688,6 +667,7 @@ def infill_articles(
     interval=2.0,
     backoff=60.0,
     max_rate_limit_hits=3,
+    max_resolve_seconds=None,
     workers=4,
     do_scrape=True,
     progress_callback=None,
@@ -710,6 +690,7 @@ def infill_articles(
             interval=interval,
             backoff=backoff,
             max_rate_limit_hits=max_rate_limit_hits,
+            max_seconds=max_resolve_seconds,
             progress_callback=progress_callback,
         )
 

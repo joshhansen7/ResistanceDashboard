@@ -25,6 +25,14 @@ MATERIAL_SCRAPE_STANDARD_MIN_LENGTH = 300
 MATERIAL_SCRAPE_MIN_RATIO = 1.5
 MATERIAL_SCRAPE_SNIPPET_MAX_LENGTH = 150
 
+# Give up on a Google News URL after this many failed resolve attempts (one per
+# daily run) — past this, the wrapper is almost certainly dead or undecodable.
+# Rate-limited attempts are never counted. Capped rows keep their snippet-based
+# analysis and stay flagged low-confidence; `status` reports them separately.
+RESOLVE_ATTEMPTS_CAP = 6
+# Stop re-scraping an analyzed thin article after this many attempts.
+UPGRADE_SCRAPE_ATTEMPTS_CAP = 5
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS articles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,7 +64,9 @@ CREATE TABLE IF NOT EXISTS articles (
     scrape_status TEXT DEFAULT 'pending',
     scrape_attempts INTEGER DEFAULT 0,
     last_scrape_at TEXT,
-    resolved_url TEXT
+    resolved_url TEXT,
+    resolve_attempts INTEGER DEFAULT 0,
+    last_resolve_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS digests (
@@ -188,6 +198,42 @@ def is_international_article(row):
     return state == "international" or location_relevance == "international"
 
 
+def unresolved_wrapper_predicate(alias="articles"):
+    """Reusable SQL predicate for Google News wrappers still awaiting resolution."""
+    return (
+        f"({alias}.url LIKE ? AND ({alias}.resolved_url IS NULL"
+        f" OR {alias}.resolved_url = '' OR {alias}.resolved_url = {alias}.url))"
+    )
+
+
+def unresolved_wrapper_params():
+    """Parameter list for the unresolved-wrapper predicate."""
+    return [LOW_CONFIDENCE_URL_PATTERN]
+
+
+def upgradeable_thin_predicate(alias="articles"):
+    """Analyzed thin rows with a usable real URL — the upgrade pass's selection.
+
+    Covers wrappers that the resolver has already resolved, plus direct
+    (non-Google) URLs that were analyzed on a summary. Rows that scraped but
+    didn't materially improve ('not_improved') are excluded for good; transient
+    failures stay retryable until the attempts cap.
+    """
+    return (
+        f"({alias}.analyzed = 1 AND {alias}.content_quality = 'thin'"
+        f" AND COALESCE({alias}.scrape_status, 'pending') != 'not_improved'"
+        f" AND COALESCE({alias}.scrape_attempts, 0) < {UPGRADE_SCRAPE_ATTEMPTS_CAP}"
+        f" AND (({alias}.url LIKE ? AND {alias}.resolved_url IS NOT NULL"
+        f" AND {alias}.resolved_url != '' AND {alias}.resolved_url != {alias}.url)"
+        f" OR ({alias}.url NOT LIKE ? AND {alias}.url IS NOT NULL AND {alias}.url != '')))"
+    )
+
+
+def upgradeable_thin_params():
+    """Parameter list for the upgradeable-thin predicate."""
+    return [LOW_CONFIDENCE_URL_PATTERN, LOW_CONFIDENCE_URL_PATTERN]
+
+
 def scrape_upgrade_is_material(old_text, new_text):
     """Only accept scrape upgrades that materially improve thin content."""
     old_len = len(old_text or "")
@@ -301,6 +347,12 @@ def init_db(db_path=None):
         if "resolved_url" not in cols:
             conn.execute("ALTER TABLE articles ADD COLUMN resolved_url TEXT")
             logger.info("Migrated: added resolved_url column")
+        if "resolve_attempts" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN resolve_attempts INTEGER DEFAULT 0")
+            logger.info("Migrated: added resolve_attempts column")
+        if "last_resolve_at" not in cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN last_resolve_at TEXT")
+            logger.info("Migrated: added last_resolve_at column")
 
         conn.execute(
             """
@@ -325,6 +377,9 @@ def init_db(db_path=None):
         )
         conn.execute(
             "UPDATE articles SET scrape_attempts = 0 WHERE scrape_attempts IS NULL"
+        )
+        conn.execute(
+            "UPDATE articles SET resolve_attempts = 0 WHERE resolve_attempts IS NULL"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_content_quality ON articles(content_quality)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_scrape_status ON articles(scrape_status)")
@@ -634,6 +689,29 @@ def get_status(conn):
     estimated_tokens = stats["analyzed"] * 500
     estimated_cost = estimated_tokens * 0.000001  # Rough Haiku pricing
     stats["api_usage_estimate"] = f"~{estimated_tokens:,} tokens (~${estimated_cost:.2f})"
+
+    # Infill backlog: URL resolution + thin-content upgrade queues
+    def _count(where, params=()):
+        return conn.execute(
+            f"SELECT COUNT(*) AS c FROM articles WHERE {where}", params
+        ).fetchone()["c"]
+
+    unresolved = unresolved_wrapper_predicate("articles")
+    stats["infill"] = {
+        "unresolved_wrappers": _count(unresolved, unresolved_wrapper_params()),
+        "resolve_exhausted": _count(
+            f"{unresolved} AND COALESCE(resolve_attempts, 0) >= {RESOLVE_ATTEMPTS_CAP}",
+            unresolved_wrapper_params(),
+        ),
+        "ready_to_upgrade": _count(
+            upgradeable_thin_predicate("articles"), upgradeable_thin_params()
+        ),
+        "upgrade_exhausted": _count(
+            "analyzed = 1 AND content_quality = 'thin'"
+            f" AND COALESCE(scrape_attempts, 0) >= {UPGRADE_SCRAPE_ATTEMPTS_CAP}"
+        ),
+        "thin_analyzed": _count("analyzed = 1 AND content_quality = 'thin'"),
+    }
 
     return stats
 

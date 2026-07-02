@@ -1402,31 +1402,36 @@ def control_run_analysis():
 @bp.route("/control/reprocess-low-confidence", methods=["POST"])
 @local_only
 def control_reprocess_low_confidence():
-    """Upgrade recent analyzed low-confidence articles in a bounded background task."""
+    """Upgrade analyzed thin articles (resolved URLs only — never hits Google)
+    in a bounded background task. days_back omitted/null = no date window."""
     import scraper
 
     data = request.get_json(silent=True) or {}
     limit = data.get("limit", 250)
-    days_back = data.get("days_back", 30)
+    days_back = data.get("days_back")
     oldest_first = bool(data.get("oldest_first", False))
     try:
         limit = max(1, min(int(limit), 1000))
     except (TypeError, ValueError):
         limit = 250
-    try:
-        days_back = max(1, min(int(days_back), 365))
-    except (TypeError, ValueError):
-        days_back = 30
+    if days_back is not None:
+        try:
+            days_back = max(1, min(int(days_back), 365))
+        except (TypeError, ValueError):
+            days_back = None
 
     task_id = _create_tracked_task("reprocess")
+    # Capture while still in the request context — current_app (and therefore
+    # get_conn) is unavailable inside the background thread.
+    db_path = current_app.config["DB_PATH"]
 
     def _progress(progress):
         _update_task_progress(task_id, progress)
 
     def _worker():
-        conn = get_conn()
+        conn = db.get_connection(db_path)
         try:
-            result = scraper.upgrade_recent_low_confidence_articles(
+            result = scraper.upgrade_resolved_thin_articles(
                 conn,
                 days_back=days_back,
                 limit=limit,

@@ -15,7 +15,8 @@ Usage:
   python resistance_dashboard.py digest --from YYYY-MM-DD --to YYYY-MM-DD
   python resistance_dashboard.py status          Show database stats
   python resistance_dashboard.py infill          Resolve Google News URLs (gradual) + scrape thin content
-  python resistance_dashboard.py infill --upgrade  Also re-scrape + reanalyze recent low-confidence articles
+  python resistance_dashboard.py infill --upgrade  Also re-scrape + reanalyze resolved thin articles
+  python resistance_dashboard.py infill --drain  Loop until the whole resolve/upgrade backlog is empty
   python resistance_dashboard.py manual          Launch manual input tool
   python resistance_dashboard.py dashboard       Launch the web dashboard
 """
@@ -130,6 +131,15 @@ def cmd_status(args):
     print(f"Next digest due:  {stats['next_digest_due']}")
     print(f"\nAPI usage estimate this month: {stats['api_usage_estimate']}")
 
+    infill = stats.get("infill", {})
+    if infill:
+        print("\nInfill backlog:")
+        print(f"  Unresolved Google News URLs:  {infill['unresolved_wrappers']}"
+              f"  ({infill['resolve_exhausted']} gave up after {db.RESOLVE_ATTEMPTS_CAP} attempts)")
+        print(f"  Ready to upgrade (real URL):  {infill['ready_to_upgrade']}")
+        print(f"  Analyzed on thin content:     {infill['thin_analyzed']}"
+              f"  ({infill['upgrade_exhausted']} hit the rescrape cap)")
+
 
 def _run_infill():
     """Resolve a bounded slice of Google News URLs + scrape thin content.
@@ -142,12 +152,38 @@ def _run_infill():
     cfg = load_config() or {}
     infill_cfg = cfg.get("infill", {}) if isinstance(cfg, dict) else {}
     return scraper.infill_articles(
-        resolve_limit=infill_cfg.get("resolve_limit_per_run", 50),
+        resolve_limit=infill_cfg.get("resolve_limit_per_run", 250),
         interval=infill_cfg.get("interval_seconds", 2.0),
         backoff=infill_cfg.get("rate_limit_backoff_seconds", 60.0),
         max_rate_limit_hits=infill_cfg.get("max_rate_limit_hits", 3),
+        max_resolve_seconds=infill_cfg.get("max_resolve_seconds", 1800),
         workers=infill_cfg.get("scrape_workers", 4),
     )
+
+
+def _run_upgrade(limit=None, days_back=None, oldest_first=False):
+    """Rescrape + re-analyze analyzed thin articles that now carry a real URL.
+
+    Never touches Google (resolution happens in the infill pass), so it drains
+    the analyzed-on-a-snippet backlog regardless of rate limits. Reads its
+    default batch size from the `infill` config block. Returns the stats dict.
+    """
+    import scraper
+    from shared import load_config
+    cfg = load_config() or {}
+    infill_cfg = cfg.get("infill", {}) if isinstance(cfg, dict) else {}
+    if limit is None:
+        limit = infill_cfg.get("upgrade_limit_per_run", 150)
+    conn = db.get_connection()
+    try:
+        return scraper.upgrade_resolved_thin_articles(
+            conn,
+            days_back=days_back,
+            limit=limit,
+            oldest_first=oldest_first,
+        )
+    finally:
+        conn.close()
 
 
 def _maybe_generate_digest(args, interval_days=14):
@@ -224,8 +260,15 @@ def cmd_run(args):
     print("\n--- Step 3: Analyzing articles ---")
     cmd_analyze(args)
 
-    # Step 4: Digest (if due)
-    print("\n--- Step 4: Checking digest schedule ---")
+    # Step 4: Upgrade — rescrape + re-analyze thin articles whose URL has been
+    # resolved (drains the analyzed-on-a-snippet backlog a slice per day)
+    print("\n--- Step 4: Upgrading resolved thin articles ---")
+    up = _run_upgrade()
+    print(f"  Upgraded:   {up.get('upgraded', 0)} of {up.get('candidates', 0)} candidates")
+    print(f"  Reanalyzed: {up.get('reanalyzed', 0)}")
+
+    # Step 5: Digest (if due)
+    print("\n--- Step 5: Checking digest schedule ---")
     _maybe_generate_digest(args)
 
     print("\n✅ Pipeline complete!")
@@ -262,23 +305,61 @@ def cmd_infill(args):
     infill_cfg = config.get("infill", {}) if isinstance(config, dict) else {}
 
     resolve_limit = args.resolve_limit if args.resolve_limit is not None \
-        else infill_cfg.get("resolve_limit_per_run", 50)
+        else infill_cfg.get("resolve_limit_per_run", 250)
     interval = args.interval if args.interval is not None \
         else infill_cfg.get("interval_seconds", 2.0)
     backoff = infill_cfg.get("rate_limit_backoff_seconds", 60.0)
     max_rate_limit_hits = infill_cfg.get("max_rate_limit_hits", 3)
+    max_resolve_seconds = infill_cfg.get("max_resolve_seconds", 1800)
     workers = infill_cfg.get("scrape_workers", 4)
 
+    def _one_pass(max_seconds=max_resolve_seconds):
+        return scraper.infill_articles(
+            resolve_limit=resolve_limit,
+            scrape_limit=args.scrape_limit,
+            interval=interval,
+            backoff=backoff,
+            max_rate_limit_hits=max_rate_limit_hits,
+            max_resolve_seconds=max_seconds,
+            workers=workers,
+            do_scrape=not args.no_scrape,
+        )
+
+    if getattr(args, "drain", False):
+        # One-time catch-up: loop resolve → scrape → upgrade until the backlog
+        # is empty. Terminates because definitive resolve/scrape attempts are
+        # capped per row (both pools shrink), sustained 429s break out below,
+        # and the 100-batch cap backstops everything else. Interrupting is
+        # fine: every attempt is committed per row, and whatever is left is
+        # picked up by the next drain or daily cron run. The per-batch time
+        # budget is cron safety, so drain mode runs without one.
+        print("  Drain mode: looping resolve → scrape → upgrade until the backlog is empty.")
+        batch = 0
+        while batch < 100:
+            batch += 1
+            print(f"\n--- Drain batch {batch} ---")
+            result = _one_pass(None)
+            r = result.get("resolve", {})
+            up = _run_upgrade(limit=args.upgrade_limit, days_back=args.upgrade_days)
+            print(
+                f"  Resolved {r.get('resolved', 0)}/{r.get('candidates', 0)} URLs; "
+                f"upgraded {up.get('upgraded', 0)}/{up.get('candidates', 0)} articles "
+                f"(reanalyzed {up.get('reanalyzed', 0)})"
+            )
+            if r.get("stopped_early"):
+                print("\n⚠️  Sustained Google rate limiting — stopping the drain here.")
+                print("   Progress is saved; re-run later or let the daily cron finish the rest.")
+                break
+            if r.get("candidates", 0) == 0 and up.get("candidates", 0) == 0:
+                print("\n✅ Backlog drained!")
+                break
+        else:
+            print("\n⚠️  Hit the 100-batch safety cap — re-run `infill --drain` to continue.")
+        print("  Tip: run `python resistance_dashboard.py analyze` to score any remaining unanalyzed articles.")
+        return
+
     print(f"  Resolving up to {resolve_limit} Google News URLs (interval {interval}s)...")
-    result = scraper.infill_articles(
-        resolve_limit=resolve_limit,
-        scrape_limit=args.scrape_limit,
-        interval=interval,
-        backoff=backoff,
-        max_rate_limit_hits=max_rate_limit_hits,
-        workers=workers,
-        do_scrape=not args.no_scrape,
-    )
+    result = _one_pass()
 
     r = result.get("resolve", {})
     s = result.get("scrape", {})
@@ -288,21 +369,15 @@ def cmd_infill(args):
     print(f"  Unresolved:   {r.get('unresolved', 0)}")
     if r.get("stopped_early"):
         print("  Note: stopped early on sustained rate limiting — resumes next run.")
+    if r.get("time_budget_exhausted"):
+        print("  Note: resolve time budget spent — resumes next run.")
     print("Scrape:")
     print(f"  Scraped:      {s.get('scraped', 0)}")
     print(f"  Failed:       {s.get('failed', 0)}")
 
     if getattr(args, "upgrade", False):
-        print("\n--- Upgrading recent low-confidence articles (uses API) ---")
-        conn = db.get_connection()
-        try:
-            up = scraper.upgrade_recent_low_confidence_articles(
-                conn,
-                days_back=args.upgrade_days,
-                limit=args.upgrade_limit,
-            )
-        finally:
-            conn.close()
+        print("\n--- Upgrading resolved thin articles (uses API) ---")
+        up = _run_upgrade(limit=args.upgrade_limit, days_back=args.upgrade_days)
         print(f"  Candidates:   {up.get('candidates', 0)}")
         print(f"  Upgraded:     {up.get('upgraded', 0)}")
         print(f"  Reanalyzed:   {up.get('reanalyzed', 0)}")
@@ -450,7 +525,7 @@ def main():
     )
     infill_parser.add_argument(
         "--resolve-limit", dest="resolve_limit", type=int, default=None,
-        help="Max Google News URLs to resolve this run (default: config or 50)",
+        help="Max Google News URLs to resolve this run (default: config or 250)",
     )
     infill_parser.add_argument(
         "--scrape-limit", dest="scrape_limit", type=int, default=None,
@@ -466,15 +541,20 @@ def main():
     )
     infill_parser.add_argument(
         "--upgrade", dest="upgrade", action="store_true",
-        help="Also re-scrape + reanalyze recent low-confidence articles (uses API)",
+        help="Also re-scrape + reanalyze resolved thin articles (uses API)",
     )
     infill_parser.add_argument(
-        "--upgrade-days", dest="upgrade_days", type=int, default=30,
-        help="Look-back window in days for --upgrade (default: 30)",
+        "--upgrade-days", dest="upgrade_days", type=int, default=None,
+        help="Look-back window in days for --upgrade (default: no window)",
     )
     infill_parser.add_argument(
-        "--upgrade-limit", dest="upgrade_limit", type=int, default=100,
-        help="Max articles to upgrade with --upgrade (default: 100)",
+        "--upgrade-limit", dest="upgrade_limit", type=int, default=None,
+        help="Max articles to upgrade per batch (default: config or 150)",
+    )
+    infill_parser.add_argument(
+        "--drain", dest="drain", action="store_true",
+        help="Loop resolve → scrape → upgrade batches until the backlog is empty "
+             "(one-time catch-up; resumable, uses API for re-analysis)",
     )
 
     # backfill — historical date-range search (subsumes the old historical-backfill)
