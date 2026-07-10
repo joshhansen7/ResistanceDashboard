@@ -465,7 +465,7 @@ async function renderUSMap(stateSentiment) {
 }
 
 // ── State drill-down (county view) ──
-async function drillIntoState(stateKey, stateNameArg, fipsArg) {
+async function drillIntoState(stateKey, stateNameArg, fipsArg, opts = {}) {
     const config = STATE_CONFIG[stateKey];
     const stateName = config ? config.name : stateNameArg;
     const fips = config ? config.fips : fipsArg;
@@ -625,7 +625,7 @@ async function drillIntoState(stateKey, stateNameArg, fipsArg) {
 
         // Update key metrics and articles panel for this state
         updateMetrics(`?state=${stateKey}`);
-        updateArticlesPanel({ state: stateKey, title: stateName });
+        if (opts.updatePanel !== false) updateArticlesPanel({ state: stateKey, title: stateName });
 
     } catch (err) {
         console.error('State map render error:', err);
@@ -634,7 +634,7 @@ async function drillIntoState(stateKey, stateNameArg, fipsArg) {
 }
 
 // ── County drill-down (single county zoom) ──
-async function drillIntoCounty(stateKey, stateName, stateFips, countyFips, countyName) {
+async function drillIntoCounty(stateKey, stateName, stateFips, countyFips, countyName, opts = {}) {
     const container = document.getElementById('wyomingMap');
     document.getElementById('mapTooltip').classList.remove('visible');
     if (_tooltipHideTimer) { clearTimeout(_tooltipHideTimer); _tooltipHideTimer = null; }
@@ -730,7 +730,7 @@ async function drillIntoCounty(stateKey, stateName, stateFips, countyFips, count
 
         // Update metrics and articles panel for this county
         updateMetrics(`?county_fips=${countyFips}`);
-        updateArticlesPanel({ county_fips: countyFips, state: stateKey, title: countyName });
+        if (opts.updatePanel !== false) updateArticlesPanel({ county_fips: countyFips, state: stateKey, title: countyName });
 
     } catch (err) {
         console.error('County drill-down error:', err);
@@ -811,7 +811,7 @@ async function updateArticlesPanel(scope) {
                 ? '<span class="pill pill-relevance pill-mentioned">Mentioned</span> '
                 : (a.state_relevance === 'primary' ? '<span class="pill pill-relevance pill-primary">Primary</span> ' : '');
             const lowConfidence = lowConfidenceBadgeHTML(a);
-            return `<div class="article-card" onclick="toggleArticleCard(this)" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleArticleCard(this)}">
+            return `<div class="article-card" data-state="${escapeHtml(a.state || '')}" data-scope="${escapeHtml(a.geography_scope || '')}" data-county-fips="${escapeHtml(a.primary_county_fips != null ? String(a.primary_county_fips) : '')}" data-county-name="${escapeHtml(a.primary_county_name || '')}" onclick="onArticleCardClick(this)" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();onArticleCardClick(this)}">
                 <div class="card-header">
                     <span class="card-score" style="background:${scoreColor}">${scoreText}</span>
                     <span class="card-title">${escapeHtml(title)}</span>
@@ -832,6 +832,59 @@ async function updateArticlesPanel(scope) {
 
 function toggleArticleCard(el) {
     el.classList.toggle('expanded');
+}
+
+// Clicking a Recent Articles card both expands it (claims/rationale) and
+// flies the adjacent map to the article's county — or its state if the
+// article is statewide / has no county.
+function onArticleCardClick(el) {
+    toggleArticleCard(el);
+    flyMapToArticle(el);
+}
+
+async function flyMapToArticle(card) {
+    const state = card.dataset.state || '';
+    const scope = card.dataset.scope || '';
+    const countyFips = card.dataset.countyFips || '';
+    const countyName = card.dataset.countyName || '';
+
+    // Nationwide / international / uncategorized articles have no map location.
+    if (!state || ['nationwide', 'international', 'other'].includes(state)) return;
+
+    // Keep the recent-articles list (and the card we just expanded) intact —
+    // only move the map + metrics, don't re-scope the panel.
+    const opts = { updatePanel: false };
+
+    const resolveStateFips = async () => {
+        let fips = getStateFips(state);
+        if (!fips) {
+            if (!_stateFipsCache) _stateFipsCache = await fetchJSON('/api/state-fips');
+            fips = _stateFipsCache[state];
+        }
+        return fips;
+    };
+
+    try {
+        if (scope === 'county' && countyFips) {
+            const stateFips = await resolveStateFips();
+            if (stateFips) {
+                await drillIntoCounty(
+                    state, getStateName(state), stateFips, countyFips,
+                    countyName || `FIPS ${countyFips}`, opts
+                );
+                return;
+            }
+        }
+        // Statewide (or county geometry unavailable) → zoom to the state.
+        if (typeof STATE_CONFIG !== 'undefined' && STATE_CONFIG[state]) {
+            await drillIntoState(state, undefined, undefined, opts);
+        } else {
+            const fips = await resolveStateFips();
+            if (fips) await drillIntoState(state, getStateName(state), fips, opts);
+        }
+    } catch (err) {
+        console.error('Locate-on-map error:', err);
+    }
 }
 
 function viewAllArticles() {
