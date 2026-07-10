@@ -16,6 +16,17 @@ let mapNavStack = [];         // navigation breadcrumb for back button
 let _statesCache = null;      // cached /api/states response
 let _stateFipsCache = null;   // cached /api/state-fips response
 
+// Covered counties — source of truth is ruby-ranch/data/meta.json (hand-synced per ship). Update when a new county's screener bundle ships.
+const COVERED_FIPS = new Set(["48389"]); // 48389 = Reeves County, TX (Pecos/Istmo campus)
+
+// Parcel-screener link/badge overlaid on the county drill-down map.
+function screenerLinkHTML(fips) {
+    if (COVERED_FIPS.has(fips)) {
+        return `<a class="pill pill-loc" style="position:absolute;top:8px;right:8px;z-index:5" href="https://ruby.sentimentdashboard.com/?county_fips=${fips}" target="_blank" rel="noopener">Open parcel screener ↗</a>`;
+    }
+    return `<span class="pill" style="position:absolute;top:8px;right:8px;z-index:5;background:rgba(148,163,184,0.12);color:var(--text-muted)">Screener: coming soon</span>`;
+}
+
 // ── Dynamic state loading ──
 async function getStates() {
     if (!_statesCache) _statesCache = (await fetchJSON('/api/states')).states;
@@ -727,6 +738,12 @@ async function drillIntoCounty(stateKey, stateName, stateFips, countyFips, count
         mapActiveCounty = countyFips;
         document.getElementById('mapTitle').textContent = countyName;
         document.getElementById('mapBackBtn').style.display = '';
+
+        // Covered-county parcel-screener link/badge, overlaid on the map.
+        // Lives inside `container` so it's cleared automatically the next
+        // time any view (US map / state / county) re-renders and resets
+        // container.innerHTML.
+        container.insertAdjacentHTML('beforeend', screenerLinkHTML(countyFips));
 
         // Update metrics and articles panel for this county
         updateMetrics(`?county_fips=${countyFips}`);
